@@ -20,7 +20,7 @@ const {
 const optionalDate = z.coerce.date().nullish();
 
 const customerBody = {
-  customerCode: code,
+  customerCode: code.optional(),
   customerName: z.string().trim().min(2).max(160),
   contactPersonName: z.string().trim().max(120).optional(),
   phoneNumber: z.string().trim().max(40).optional(),
@@ -34,7 +34,7 @@ const customerBody = {
 };
 
 const supplierBody = {
-  supplierCode: code,
+  supplierCode: code.optional(),
   supplierName: z.string().trim().min(2).max(160),
   contactPersonName: z.string().trim().max(120).optional(),
   phoneNumber: z.string().trim().max(40).optional(),
@@ -47,7 +47,7 @@ const supplierBody = {
 };
 
 const cylinderTypeBody = {
-  typeCode: code,
+  typeCode: code.optional(),
   typeName: z.string().trim().min(2).max(120),
   capacityKg: positiveKg,
   tareWeightKg: nonNegative.optional(),
@@ -56,7 +56,7 @@ const cylinderTypeBody = {
 };
 
 const storageTankCreateBody = {
-  tankCode: code,
+  tankCode: code.optional(),
   tankName: z.string().trim().min(2).max(120),
   capacityKg: positiveKg,
   currentQuantityKg: nonNegative.optional(),
@@ -79,7 +79,7 @@ const storageTankUpdateBody = {
 };
 
 const inventoryCreateBody = {
-  itemCode: code,
+  itemCode: code.optional(),
   itemName: z.string().trim().min(2).max(160),
   itemCategory: z.enum(ITEM_CATEGORIES),
   unitOfMeasure: z.enum(UNITS_OF_MEASURE),
@@ -102,7 +102,7 @@ const inventoryUpdateBody = {
 };
 
 const employeeBody = {
-  employeeCode: code,
+  employeeCode: code.optional(),
   fullName: z.string().trim().min(2).max(120),
   departmentName: z.string().trim().max(80).optional(),
   jobTitle: z.string().trim().max(80).optional(),
@@ -114,7 +114,7 @@ const employeeBody = {
 };
 
 const accountCreateBody = {
-  accountCode: code,
+  accountCode: code.optional(),
   accountName: z.string().trim().min(2).max(160),
   accountType: z.enum(ACCOUNT_TYPES),
   parentAccountId: objectId.nullish(),
@@ -131,7 +131,7 @@ const accountUpdateBody = {
 };
 
 const expenseCategoryBody = {
-  categoryCode: code,
+  categoryCode: code.optional(),
   categoryName: z.string().trim().min(2).max(120),
   description: z.string().trim().max(300).optional(),
   isActive: z.boolean().optional(),

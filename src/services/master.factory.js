@@ -1,6 +1,7 @@
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
+const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 
 function createMasterService({
@@ -9,6 +10,7 @@ function createMasterService({
   moduleName,
   uniqueField,
   cachePrefix,
+  codePrefix,
   populate = [],
   searchFields = [],
   sort = { createdAt: -1 },
@@ -52,12 +54,34 @@ function createMasterService({
     }
   }
 
+  async function assignCode(payload) {
+    if (!codePrefix || !uniqueField) return payload;
+    const current = String(payload[uniqueField] || '').trim();
+    if (current) {
+      payload[uniqueField] = current;
+      return payload;
+    }
+    payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix);
+    return payload;
+  }
+
   async function create(body, req) {
-    const payload = prepareCreate ? await prepareCreate({ ...body }, req) : { ...body };
+    let payload = prepareCreate ? await prepareCreate({ ...body }, req) : { ...body };
+    payload = await assignCode(payload);
     if (uniqueField) {
       await assertUnique(payload[uniqueField]);
     }
-    const doc = await Model.create(payload);
+    let doc;
+    try {
+      doc = await Model.create(payload);
+    } catch (error) {
+      if (error?.code !== 11000 || !codePrefix) {
+        throw error;
+      }
+      payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix);
+      await assertUnique(payload[uniqueField]);
+      doc = await Model.create(payload);
+    }
     invalidate(doc._id);
     await writeAudit({
       req,
