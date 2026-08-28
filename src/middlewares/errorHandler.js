@@ -25,6 +25,16 @@ function errorHandler(err, req, res, next) {
     message = 'Invalid or expired token';
   }
 
+  if (
+    err.name === 'MongooseError' ||
+    err.name === 'MongoServerSelectionError' ||
+    err.name === 'MongoNetworkError' ||
+    /buffering timed out|failed to connect/i.test(err.message || '')
+  ) {
+    statusCode = 503;
+    message = 'Database unavailable. Check MongoDB connection and Atlas network access.';
+  }
+
   if (statusCode >= 500) {
     // eslint-disable-next-line no-console
     console.error(err);

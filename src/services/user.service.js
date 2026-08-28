@@ -1,5 +1,5 @@
 const bcrypt = require('bcryptjs');
-const { User, Role } = require('../models');
+const { User, Role, Employee } = require('../models');
 const env = require('../config/env');
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
@@ -9,6 +9,29 @@ const { writeAudit } = require('./audit.service');
 const notificationService = require('./notification.service');
 
 const USER_SELECT = 'fullName emailAddress roleId employeeId isActive lastLoginAt createdAt updatedAt';
+
+async function assertEmployee(employeeId) {
+  if (employeeId === undefined || employeeId === null || employeeId === '') {
+    return null;
+  }
+  const employee = await Employee.findById(employeeId);
+  if (!employee) {
+    throw new ApiError(400, 'Employee not found');
+  }
+  if (employee.employmentStatus === 'terminated') {
+    throw new ApiError(400, 'Employee is terminated');
+  }
+  return employee;
+}
+
+async function assertEmployeeAvailable(employeeId, userId) {
+  const employee = await assertEmployee(employeeId);
+  if (!employee) return;
+  const taken = await User.findOne({ employeeId, _id: { $ne: userId } }).select('_id');
+  if (taken) {
+    throw new ApiError(409, 'Employee is already linked to another user');
+  }
+}
 
 async function assertRole(roleId) {
   const role = await Role.findById(roleId);
@@ -23,6 +46,7 @@ async function assertRole(roleId) {
 
 async function createUser(body, req) {
   await assertRole(body.roleId);
+  await assertEmployeeAvailable(body.employeeId);
 
   const exists = await User.findOne({ emailAddress: body.emailAddress });
   if (exists) {
@@ -58,7 +82,7 @@ async function createUser(body, req) {
   });
 
   cache.delByPrefix('users:');
-  const populated = await User.findById(user._id).select(USER_SELECT).populate('roleId', 'roleName isActive');
+  const populated = await User.findById(user._id).select(USER_SELECT).populate('roleId', 'roleName isActive').populate('employeeId', 'employeeCode fullName jobTitle employmentStatus');
   return toUserResponse(populated);
 }
 
@@ -77,7 +101,7 @@ async function listUsers(query) {
   }
 
   const [items, total, roles, roleCounts] = await Promise.all([
-    User.find(filter).select(USER_SELECT).populate('roleId', 'roleName isActive').sort({ createdAt: -1 }).skip(skip).limit(limit),
+    User.find(filter).select(USER_SELECT).populate('roleId', 'roleName isActive').populate('employeeId', 'employeeCode fullName jobTitle employmentStatus').sort({ createdAt: -1 }).skip(skip).limit(limit),
     User.countDocuments(filter),
     Role.find().select('roleName roleDescription isActive').sort({ roleName: 1 }).lean(),
     User.aggregate([{ $group: { _id: '$roleId', userCount: { $sum: 1 } } }]),
@@ -101,7 +125,7 @@ async function listUsers(query) {
 }
 
 async function getUserById(id) {
-  const user = await User.findById(id).select(USER_SELECT).populate('roleId', 'roleName isActive');
+  const user = await User.findById(id).select(USER_SELECT).populate('roleId', 'roleName isActive').populate('employeeId', 'employeeCode fullName jobTitle employmentStatus');
   if (!user) {
     throw new ApiError(404, 'User not found');
   }
@@ -116,6 +140,10 @@ async function updateUser(id, body, req) {
 
   if (body.roleId) {
     await assertRole(body.roleId);
+  }
+
+  if (body.employeeId !== undefined) {
+    await assertEmployeeAvailable(body.employeeId, id);
   }
 
   if (body.emailAddress && body.emailAddress !== user.emailAddress) {
@@ -148,7 +176,7 @@ async function updateUser(id, body, req) {
     newValues: body,
   });
 
-  const populated = await User.findById(id).select(USER_SELECT).populate('roleId', 'roleName isActive');
+  const populated = await User.findById(id).select(USER_SELECT).populate('roleId', 'roleName isActive').populate('employeeId', 'employeeCode fullName jobTitle employmentStatus');
   return toUserResponse(populated);
 }
 

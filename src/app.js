@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const env = require('./config/env');
+const { connectDB, dbState } = require('./config/db');
 const routes = require('./routes');
 const notFound = require('./middlewares/notFound');
 const errorHandler = require('./middlewares/errorHandler');
@@ -42,13 +43,26 @@ const loginLimiter = rateLimit({
 app.use(globalLimiter);
 app.use('/api/auth/login', loginLimiter);
 
+app.use(async (req, res, next) => {
+  if (req.path === '/health' || req.path === '/') {
+    return next();
+  }
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     success: true,
     message: 'OK',
     data: {
       service: 'brother-lpg-api',
-      phase: 1,
+      phase: 2,
+      db: dbState(),
       timestamp: new Date().toISOString(),
     },
   });
@@ -58,7 +72,7 @@ app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'Brother LPG Plant ERP API',
-    data: { version: '1.0.0', phase: 1 },
+    data: { version: '1.0.0', phase: 2 },
   });
 });
 
