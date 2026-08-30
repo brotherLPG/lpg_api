@@ -5,6 +5,7 @@ const roleRoutes = require('./role.routes');
 const permissionRoutes = require('./permission.routes');
 const { settingsRouter, notificationRouter, auditRouter } = require('./system.routes');
 const masters = require('./masters.routes');
+const { lpgReceipts, fillingBatches } = require('./lpg.routes');
 
 const router = express.Router();
 
@@ -23,5 +24,7 @@ router.use('/inventory-items', masters.inventoryItems);
 router.use('/employees', masters.employees);
 router.use('/accounts', masters.accounts);
 router.use('/expense-categories', masters.expenseCategories);
+router.use('/lpg-receipts', lpgReceipts);
+router.use('/filling-batches', fillingBatches);
 
 module.exports = router;

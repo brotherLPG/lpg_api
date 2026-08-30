@@ -8,10 +8,10 @@ function clientMeta(req) {
   };
 }
 
-async function writeAudit({ req, actionName, moduleName, entityName, entityId, oldValues, newValues }) {
+async function writeAudit({ req, actionName, moduleName, entityName, entityId, oldValues, newValues, session }) {
   try {
     const meta = clientMeta(req);
-    await AuditLog.create({
+    const payload = {
       userId: req?.user?._id || null,
       actionName,
       moduleName,
@@ -21,7 +21,12 @@ async function writeAudit({ req, actionName, moduleName, entityName, entityId, o
       newValues: newValues || null,
       ipAddress: meta.ipAddress,
       userAgent: meta.userAgent,
-    });
+    };
+    if (session) {
+      await AuditLog.create([payload], { session });
+    } else {
+      await AuditLog.create(payload);
+    }
   } catch (error) {
     logger.error('Failed to write audit log', { message: error.message });
   }

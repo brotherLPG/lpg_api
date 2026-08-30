@@ -12,6 +12,8 @@ const InventoryItem = require('./inventoryItem.model');
 const Employee = require('./employee.model');
 const Account = require('./account.model');
 const ExpenseCategory = require('./expenseCategory.model');
+const LPGReceipt = require('./lpgReceipt.model');
+const FillingBatch = require('./fillingBatch.model');
 
 module.exports = {
   Permission,
@@ -28,4 +30,6 @@ module.exports = {
   Employee,
   Account,
   ExpenseCategory,
+  LPGReceipt,
+  FillingBatch,
 };

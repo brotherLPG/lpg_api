@@ -8,6 +8,8 @@ const {
   Account,
   ExpenseCategory,
   User,
+  LPGReceipt,
+  FillingBatch,
 } = require('../models');
 const ApiError = require('../utils/ApiError');
 const { createMasterService } = require('./master.factory');
@@ -100,6 +102,12 @@ const supplier = createMasterService({
   codePrefix: 'SUP',
   cachePrefix: 'suppliers:',
   searchFields: ['supplierCode', 'supplierName', 'phoneNumber', 'emailAddress'],
+  assertDelete: async (doc) => {
+    const used = await LPGReceipt.countDocuments({ supplierId: doc._id });
+    if (used > 0) {
+      throw new ApiError(400, 'Supplier has LPG receipts and cannot be deleted');
+    }
+  },
 });
 
 const cylinderType = createMasterService({
@@ -115,6 +123,10 @@ const cylinderType = createMasterService({
     const inUse = await InventoryItem.countDocuments({ cylinderTypeId: doc._id });
     if (inUse > 0) {
       throw new ApiError(400, 'CylinderType is used by inventory items and cannot be deleted');
+    }
+    const batches = await FillingBatch.countDocuments({ cylinderTypeId: doc._id });
+    if (batches > 0) {
+      throw new ApiError(400, 'CylinderType is used by filling batches and cannot be deleted');
     }
   },
 });
@@ -147,6 +159,13 @@ const storageTank = createMasterService({
   assertDelete: async (doc) => {
     if (doc.currentQuantityKg > 0) {
       throw new ApiError(400, 'StorageTank still has LPG and cannot be deleted');
+    }
+    const [receipts, batches] = await Promise.all([
+      LPGReceipt.countDocuments({ storageTankId: doc._id }),
+      FillingBatch.countDocuments({ storageTankId: doc._id }),
+    ]);
+    if (receipts > 0 || batches > 0) {
+      throw new ApiError(400, 'StorageTank has LPG history and cannot be deleted');
     }
   },
 });
@@ -209,6 +228,10 @@ const employee = createMasterService({
     const linked = await User.countDocuments({ employeeId: doc._id });
     if (linked > 0) {
       throw new ApiError(400, 'Employee is linked to a user and cannot be deleted');
+    }
+    const batches = await FillingBatch.countDocuments({ operatorEmployeeId: doc._id });
+    if (batches > 0) {
+      throw new ApiError(400, 'Employee has filling batches and cannot be deleted');
     }
   },
 });
