@@ -6,6 +6,7 @@ const permissionRoutes = require('./permission.routes');
 const { settingsRouter, notificationRouter, auditRouter } = require('./system.routes');
 const masters = require('./masters.routes');
 const { lpgReceipts, fillingBatches } = require('./lpg.routes');
+const { sales, salesReturns, payments, expenses } = require('./finance.routes');
 
 const router = express.Router();
 
@@ -26,5 +27,9 @@ router.use('/accounts', masters.accounts);
 router.use('/expense-categories', masters.expenseCategories);
 router.use('/lpg-receipts', lpgReceipts);
 router.use('/filling-batches', fillingBatches);
+router.use('/sales', sales);
+router.use('/sales-returns', salesReturns);
+router.use('/payments', payments);
+router.use('/expenses', expenses);
 
 module.exports = router;

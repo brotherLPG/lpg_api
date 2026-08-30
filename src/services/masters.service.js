@@ -10,6 +10,10 @@ const {
   User,
   LPGReceipt,
   FillingBatch,
+  Sale,
+  SalesReturn,
+  Payment,
+  Expense,
 } = require('../models');
 const ApiError = require('../utils/ApiError');
 const { createMasterService } = require('./master.factory');
@@ -92,6 +96,16 @@ const customer = createMasterService({
   codePrefix: 'CUST',
   cachePrefix: 'customers:',
   searchFields: ['customerCode', 'customerName', 'phoneNumber', 'emailAddress'],
+  assertDelete: async (doc) => {
+    const [sales, returns, payments] = await Promise.all([
+      Sale.countDocuments({ customerId: doc._id }),
+      SalesReturn.countDocuments({ customerId: doc._id }),
+      Payment.countDocuments({ customerId: doc._id }),
+    ]);
+    if (sales || returns || payments) {
+      throw new ApiError(400, 'Customer has sales or payments and cannot be deleted');
+    }
+  },
 });
 
 const supplier = createMasterService({
@@ -104,8 +118,9 @@ const supplier = createMasterService({
   searchFields: ['supplierCode', 'supplierName', 'phoneNumber', 'emailAddress'],
   assertDelete: async (doc) => {
     const used = await LPGReceipt.countDocuments({ supplierId: doc._id });
-    if (used > 0) {
-      throw new ApiError(400, 'Supplier has LPG receipts and cannot be deleted');
+    const paid = await Payment.countDocuments({ supplierId: doc._id });
+    if (used > 0 || paid > 0) {
+      throw new ApiError(400, 'Supplier has LPG receipts or payments and cannot be deleted');
     }
   },
 });
@@ -204,6 +219,10 @@ const inventoryItem = createMasterService({
     if (doc.currentQuantity !== 0) {
       throw new ApiError(400, 'InventoryItem still has stock and cannot be deleted');
     }
+    const sold = await Sale.countDocuments({ 'lineItems.inventoryItemId': doc._id });
+    if (sold > 0) {
+      throw new ApiError(400, 'InventoryItem is used in sales and cannot be deleted');
+    }
   },
 });
 
@@ -281,6 +300,12 @@ const expenseCategory = createMasterService({
   cachePrefix: 'expense-categories:',
   searchFields: ['categoryCode', 'categoryName'],
   sort: { categoryName: 1 },
+  assertDelete: async (doc) => {
+    const used = await Expense.countDocuments({ expenseCategoryId: doc._id });
+    if (used > 0) {
+      throw new ApiError(400, 'ExpenseCategory is used by expenses and cannot be deleted');
+    }
+  },
 });
 
 module.exports = {

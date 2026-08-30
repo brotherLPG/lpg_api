@@ -14,6 +14,10 @@ const Account = require('./account.model');
 const ExpenseCategory = require('./expenseCategory.model');
 const LPGReceipt = require('./lpgReceipt.model');
 const FillingBatch = require('./fillingBatch.model');
+const Sale = require('./sale.model');
+const SalesReturn = require('./salesReturn.model');
+const Payment = require('./payment.model');
+const Expense = require('./expense.model');
 
 module.exports = {
   Permission,
@@ -32,4 +36,8 @@ module.exports = {
   ExpenseCategory,
   LPGReceipt,
   FillingBatch,
+  Sale,
+  SalesReturn,
+  Payment,
+  Expense,
 };
