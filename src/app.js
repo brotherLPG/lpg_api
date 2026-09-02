@@ -61,7 +61,7 @@ app.get('/health', (req, res) => {
     message: 'OK',
     data: {
       service: 'brother-lpg-api',
-      phase: 4,
+      phase: 5,
       db: dbState(),
       timestamp: new Date().toISOString(),
     },
@@ -72,7 +72,7 @@ app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'Brother LPG Plant ERP API',
-    data: { version: '1.0.0', phase: 4 },
+    data: { version: '1.0.0', phase: 5 },
   });
 });
 

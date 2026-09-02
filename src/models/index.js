@@ -18,6 +18,9 @@ const Sale = require('./sale.model');
 const SalesReturn = require('./salesReturn.model');
 const Payment = require('./payment.model');
 const Expense = require('./expense.model');
+const MaintenanceAsset = require('./maintenanceAsset.model');
+const MaintenanceRecord = require('./maintenanceRecord.model');
+const Asset = require('./asset.model');
 
 module.exports = {
   Permission,
@@ -40,4 +43,7 @@ module.exports = {
   SalesReturn,
   Payment,
   Expense,
+  MaintenanceAsset,
+  MaintenanceRecord,
+  Asset,
 };

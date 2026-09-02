@@ -52,6 +52,27 @@ const expenseCategories = createMasterRouter({
   schemas: schemas.expenseCategory,
 });
 
+const assetSchemas = require('../validations/assets.validation');
+
+const maintenanceAssets = createMasterRouter({
+  moduleName: 'maintenance-assets',
+  controller: createMasterController(masters.maintenanceAsset, { singular: 'Maintenance asset', plural: 'Maintenance assets' }),
+  schemas: assetSchemas.maintenanceAsset,
+});
+
+const maintenanceRecords = createMasterRouter({
+  moduleName: 'maintenance-records',
+  controller: createMasterController(masters.maintenanceRecord, { singular: 'Maintenance record', plural: 'Maintenance records' }),
+  schemas: assetSchemas.maintenanceRecord,
+  allowDelete: false,
+});
+
+const assets = createMasterRouter({
+  moduleName: 'assets',
+  controller: createMasterController(masters.asset, { singular: 'Asset', plural: 'Assets' }),
+  schemas: assetSchemas.asset,
+});
+
 module.exports = {
   customers,
   suppliers,
@@ -61,4 +82,7 @@ module.exports = {
   employees,
   accounts,
   expenseCategories,
+  maintenanceAssets,
+  maintenanceRecords,
+  assets,
 };

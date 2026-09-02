@@ -14,14 +14,23 @@ const {
   SalesReturn,
   Payment,
   Expense,
+  MaintenanceAsset,
+  MaintenanceRecord,
+  Asset,
 } = require('../models');
 const ApiError = require('../utils/ApiError');
+const cache = require('../config/cache');
 const { createMasterService } = require('./master.factory');
 const {
   TANK_STATUSES,
   ACCOUNT_TYPES,
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORIES,
+  ASSET_CATEGORIES,
+  MAINTENANCE_ASSET_STATUSES,
+  MAINTENANCE_TYPES,
+  ASSET_STATUSES,
+  DEPRECIATION_METHODS,
 } = require('../constants/masters');
 
 async function assertActiveCylinderType(cylinderTypeId) {
@@ -252,6 +261,14 @@ const employee = createMasterService({
     if (batches > 0) {
       throw new ApiError(400, 'Employee has filling batches and cannot be deleted');
     }
+    const maintenance = await MaintenanceRecord.countDocuments({ performedByEmployeeId: doc._id });
+    if (maintenance > 0) {
+      throw new ApiError(400, 'Employee has maintenance records and cannot be deleted');
+    }
+    const assignedAssets = await Asset.countDocuments({ assignedEmployeeId: doc._id });
+    if (assignedAssets > 0) {
+      throw new ApiError(400, 'Employee has assigned assets and cannot be deleted');
+    }
   },
 });
 
@@ -308,6 +325,174 @@ const expenseCategory = createMasterService({
   },
 });
 
+async function assertWorkEmployee(employeeId) {
+  if (!employeeId) return null;
+  const employee = await Employee.findById(employeeId);
+  if (!employee) {
+    throw new ApiError(400, 'Employee not found');
+  }
+  if (employee.employmentStatus === 'terminated') {
+    throw new ApiError(400, 'Employee is terminated');
+  }
+  return employee;
+}
+
+async function assertMaintenanceAssetExists(maintenanceAssetId) {
+  const plantAsset = await MaintenanceAsset.findById(maintenanceAssetId);
+  if (!plantAsset) {
+    throw new ApiError(400, 'MaintenanceAsset not found');
+  }
+  if (plantAsset.operationalStatus === 'retired') {
+    throw new ApiError(400, 'MaintenanceAsset is retired');
+  }
+  return plantAsset;
+}
+
+function assertBookValue(payload, existing = {}) {
+  const purchaseCostAmount = payload.purchaseCostAmount ?? existing.purchaseCostAmount ?? 0;
+  const currentBookValueAmount = payload.currentBookValueAmount ?? existing.currentBookValueAmount ?? purchaseCostAmount;
+  if (currentBookValueAmount > purchaseCostAmount) {
+    throw new ApiError(400, 'currentBookValueAmount cannot exceed purchaseCostAmount');
+  }
+}
+
+function assertMaintenanceDates(payload, existing = {}) {
+  const maintenanceDate = payload.maintenanceDate ?? existing.maintenanceDate;
+  const nextMaintenanceDate = payload.nextMaintenanceDate ?? existing.nextMaintenanceDate;
+  if (maintenanceDate && nextMaintenanceDate && new Date(nextMaintenanceDate) < new Date(maintenanceDate)) {
+    throw new ApiError(400, 'nextMaintenanceDate cannot be before maintenanceDate');
+  }
+}
+
+const maintenanceAsset = createMasterService({
+  Model: MaintenanceAsset,
+  entityName: 'MaintenanceAsset',
+  moduleName: 'maintenance-assets',
+  uniqueField: 'assetCode',
+  codePrefix: 'MAS',
+  cachePrefix: 'maintenance-assets:',
+  searchFields: ['assetCode', 'assetName', 'serialNumber', 'locationName', 'manufacturerName'],
+  hasIsActive: false,
+  extraFilters: (query) => {
+    const filter = {};
+    if (query.assetCategory) filter.assetCategory = query.assetCategory;
+    if (query.operationalStatus) filter.operationalStatus = query.operationalStatus;
+    return filter;
+  },
+  listMeta: async () => ({
+    assetCategories: ASSET_CATEGORIES,
+    operationalStatuses: MAINTENANCE_ASSET_STATUSES,
+  }),
+  prepareCreate: async (body) => {
+    if (!body.serialNumber) body.serialNumber = null;
+    return body;
+  },
+  prepareUpdate: async (body) => {
+    if (body.serialNumber === '') body.serialNumber = null;
+    return body;
+  },
+  assertDelete: async (doc) => {
+    const records = await MaintenanceRecord.countDocuments({ maintenanceAssetId: doc._id });
+    if (records > 0) {
+      throw new ApiError(400, 'MaintenanceAsset has records and cannot be deleted');
+    }
+  },
+});
+
+const maintenanceRecord = createMasterService({
+  Model: MaintenanceRecord,
+  entityName: 'MaintenanceRecord',
+  moduleName: 'maintenance-records',
+  uniqueField: 'maintenanceNumber',
+  codePrefix: 'MNT',
+  cachePrefix: 'maintenance-records:',
+  populate: [
+    { path: 'maintenanceAssetId', select: 'assetCode assetName assetCategory operationalStatus locationName' },
+    { path: 'performedByEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
+    { path: 'approvedByUserId', select: 'fullName emailAddress' },
+  ],
+  searchFields: ['maintenanceNumber', 'problemDescription', 'workPerformed'],
+  hasIsActive: false,
+  allowDelete: false,
+  extraFilters: (query) => {
+    const filter = {};
+    if (query.maintenanceAssetId) filter.maintenanceAssetId = query.maintenanceAssetId;
+    if (query.performedByEmployeeId) filter.performedByEmployeeId = query.performedByEmployeeId;
+    if (query.maintenanceType) filter.maintenanceType = query.maintenanceType;
+    if (query.startDate || query.endDate) {
+      filter.maintenanceDate = {};
+      if (query.startDate) filter.maintenanceDate.$gte = new Date(query.startDate);
+      if (query.endDate) filter.maintenanceDate.$lte = new Date(query.endDate);
+    }
+    return filter;
+  },
+  listMeta: async () => ({
+    maintenanceTypes: MAINTENANCE_TYPES,
+  }),
+  prepareCreate: async (body, req) => {
+    const plantAsset = await assertMaintenanceAssetExists(body.maintenanceAssetId);
+    await assertWorkEmployee(body.performedByEmployeeId);
+    if (!body.maintenanceDate) body.maintenanceDate = new Date();
+    assertMaintenanceDates(body);
+    body.approvedByUserId = req.user._id;
+    if (['corrective', 'emergency'].includes(body.maintenanceType) && plantAsset.operationalStatus === 'operational') {
+      plantAsset.operationalStatus = 'maintenance';
+      await plantAsset.save();
+      cache.delByPrefix('maintenance-assets:');
+    }
+    return body;
+  },
+  prepareUpdate: async (body, doc) => {
+    if (body.maintenanceAssetId) {
+      await assertMaintenanceAssetExists(body.maintenanceAssetId);
+    }
+    if (body.performedByEmployeeId) {
+      await assertWorkEmployee(body.performedByEmployeeId);
+    }
+    assertMaintenanceDates(body, doc);
+    return body;
+  },
+});
+
+const asset = createMasterService({
+  Model: Asset,
+  entityName: 'Asset',
+  moduleName: 'assets',
+  uniqueField: 'assetCode',
+  codePrefix: 'AST',
+  cachePrefix: 'assets:',
+  populate: [{ path: 'assignedEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' }],
+  searchFields: ['assetCode', 'assetName', 'locationName'],
+  hasIsActive: false,
+  extraFilters: (query) => {
+    const filter = {};
+    if (query.assetCategory) filter.assetCategory = query.assetCategory;
+    if (query.assetStatus) filter.assetStatus = query.assetStatus;
+    if (query.assignedEmployeeId) filter.assignedEmployeeId = query.assignedEmployeeId;
+    return filter;
+  },
+  listMeta: async () => ({
+    assetCategories: ASSET_CATEGORIES,
+    assetStatuses: ASSET_STATUSES,
+    depreciationMethods: DEPRECIATION_METHODS,
+  }),
+  prepareCreate: async (body) => {
+    await assertWorkEmployee(body.assignedEmployeeId);
+    if (body.currentBookValueAmount === undefined) {
+      body.currentBookValueAmount = body.purchaseCostAmount || 0;
+    }
+    assertBookValue(body);
+    return body;
+  },
+  prepareUpdate: async (body, doc) => {
+    if (body.assignedEmployeeId !== undefined) {
+      await assertWorkEmployee(body.assignedEmployeeId);
+    }
+    assertBookValue(body, doc);
+    return body;
+  },
+});
+
 module.exports = {
   customer,
   supplier,
@@ -317,4 +502,7 @@ module.exports = {
   employee,
   account,
   expenseCategory,
+  maintenanceAsset,
+  maintenanceRecord,
+  asset,
 };
