@@ -44,6 +44,11 @@ function humanize(value) {
 }
 
 const SUPER_ADMIN_ROLE_NAME = 'Super Admin';
+const ACCESS_LABELS = {
+  full: 'Full Access',
+  view: 'View Only',
+  none: 'No Access',
+};
 
 function accessLevel(actionSet) {
   const write = ['create', 'update', 'delete'].some((action) => actionSet.has(action));
@@ -62,11 +67,15 @@ function permissionsPreview(permissions = []) {
     byModule.get(moduleName).add(permission.actionName);
   }
 
-  return ERP_MODULES.map(({ moduleName }) => ({
-    moduleName,
-    displayName: humanize(moduleName),
-    access: accessLevel(byModule.get(moduleName) || new Set()),
-  }));
+  return ERP_MODULES.map(({ moduleName }) => {
+    const access = accessLevel(byModule.get(moduleName) || new Set());
+    return {
+      moduleName,
+      displayName: humanize(moduleName),
+      access,
+      accessLabel: ACCESS_LABELS[access],
+    };
+  });
 }
 
 function permissionMatrix(allPermissions = [], grantedIds = []) {

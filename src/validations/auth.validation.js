@@ -1,11 +1,24 @@
 const { z } = require('zod');
-const { emailAddress, password, objectId } = require('./common.validation');
+const {
+  emailAddress,
+  username,
+  phoneNumber,
+  cnicNumber,
+  optionalLinkedId,
+  password,
+  objectId,
+} = require('./common.validation');
 
 const loginSchema = z.object({
-  body: z.object({
-    emailAddress,
-    password: z.string().min(1, 'Password is required'),
-  }),
+  body: z
+    .object({
+      emailAddress: z.string().trim().optional(),
+      username: z.string().trim().optional(),
+      password: z.string().min(1, 'Password is required'),
+    })
+    .refine((data) => data.emailAddress || data.username, {
+      message: 'emailAddress or username is required',
+    }),
 });
 
 const refreshSchema = z.object({
@@ -22,14 +35,23 @@ const changePasswordSchema = z.object({
 });
 
 const createUserSchema = z.object({
-  body: z.object({
-    fullName: z.string().trim().min(2).max(120),
-    emailAddress,
-    password,
-    roleId: objectId,
-    employeeId: objectId.nullish(),
-    isActive: z.boolean().optional(),
-  }),
+  body: z
+    .object({
+      fullName: z.string().trim().min(2).max(120),
+      emailAddress,
+      phoneNumber,
+      cnicNumber,
+      username,
+      password,
+      confirmPassword: z.string().optional(),
+      roleId: objectId,
+      employeeId: optionalLinkedId,
+      isActive: z.boolean().optional(),
+    })
+    .refine((data) => !data.confirmPassword || data.confirmPassword === data.password, {
+      message: 'Passwords do not match',
+      path: ['confirmPassword'],
+    }),
 });
 
 const updateUserSchema = z.object({
@@ -38,13 +60,22 @@ const updateUserSchema = z.object({
     .object({
       fullName: z.string().trim().min(2).max(120).optional(),
       emailAddress: emailAddress.optional(),
+      phoneNumber: phoneNumber.optional(),
+      cnicNumber: cnicNumber.optional(),
+      username: username.optional(),
       roleId: objectId.optional(),
-      employeeId: objectId.nullish(),
+      employeeId: optionalLinkedId.optional(),
       isActive: z.boolean().optional(),
     })
     .refine((data) => Object.keys(data).length > 0, {
       message: 'At least one field is required',
     }),
+});
+
+const formOptionsQuerySchema = z.object({
+  query: z.object({
+    userId: objectId.optional(),
+  }),
 });
 
 const userIdParamSchema = z.object({
@@ -77,4 +108,5 @@ module.exports = {
   userIdParamSchema,
   resetPasswordSchema,
   listUsersQuerySchema,
+  formOptionsQuerySchema,
 };

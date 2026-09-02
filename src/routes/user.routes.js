@@ -8,6 +8,7 @@ const {
   userIdParamSchema,
   resetPasswordSchema,
   listUsersQuerySchema,
+  formOptionsQuerySchema,
 } = require('../validations/auth.validation');
 const userController = require('../controllers/user.controller');
 
@@ -15,6 +16,12 @@ const router = express.Router();
 
 router.use(authenticate);
 
+router.get(
+  '/form-options',
+  authorize('users.read'),
+  validate(formOptionsQuerySchema),
+  userController.getFormOptions
+);
 router.post('/', authorize('users.create'), validate(createUserSchema), userController.createUser);
 router.get('/', authorize('users.read'), validate(listUsersQuerySchema), userController.listUsers);
 router.get('/:id', authorize('users.read'), validate(userIdParamSchema), userController.getUser);

@@ -24,6 +24,24 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
+    username: {
+      type: String,
+      unique: true,
+      sparse: true,
+      lowercase: true,
+      trim: true,
+    },
+    phoneNumber: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    cnicNumber: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
     passwordHash: {
       type: String,
       required: [true, 'passwordHash is required'],

@@ -157,6 +157,7 @@ async function seed() {
     admin = await User.create({
       fullName: env.admin.fullName,
       emailAddress: env.admin.emailAddress,
+      username: env.admin.username,
       passwordHash: await bcrypt.hash(env.admin.password, env.bcryptRounds),
       roleId: role._id,
       isActive: true,
@@ -165,6 +166,9 @@ async function seed() {
   } else {
     admin.roleId = role._id;
     admin.isActive = true;
+    if (!admin.username) {
+      admin.username = env.admin.username;
+    }
     await admin.save();
     logger.info('Admin user already exists — role synced', { emailAddress: admin.emailAddress });
   }

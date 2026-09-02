@@ -2,6 +2,12 @@ const asyncHandler = require('../utils/asyncHandler');
 const { send } = require('../utils/apiResponse');
 const userService = require('../services/user.service');
 
+exports.getFormOptions = asyncHandler(async (req, res) => {
+  const query = req.validated?.query || req.query;
+  const data = await userService.getFormOptions(query.userId);
+  send(res, 200, 'User form options fetched', data);
+});
+
 exports.createUser = asyncHandler(async (req, res) => {
   const data = await userService.createUser(req.body, req);
   send(res, 201, 'User created', data);

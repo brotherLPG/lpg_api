@@ -9,17 +9,36 @@ const { loadPermissionCodes } = require('../middlewares/auth');
 const { writeAudit, clientMeta } = require('./audit.service');
 
 function toUserResponse(user, permissionCodes = []) {
-  const role = user.roleId && user.roleId.roleName
-    ? { _id: user.roleId._id, roleName: user.roleId.roleName, isActive: user.roleId.isActive }
+  const roleDoc = user.roleId && user.roleId.roleName ? user.roleId : null;
+  const role = roleDoc
+    ? {
+        _id: roleDoc._id,
+        roleName: roleDoc.roleName,
+        roleDescription: roleDoc.roleDescription || '',
+        isActive: roleDoc.isActive,
+      }
     : user.roleId;
+
+  const employeeDoc = user.employeeId && user.employeeId.fullName ? user.employeeId : null;
 
   return {
     _id: user._id,
     fullName: user.fullName,
     emailAddress: user.emailAddress,
+    username: user.username || '',
+    phoneNumber: user.phoneNumber || '',
+    cnicNumber: user.cnicNumber || '',
     roleId: user.roleId?._id || user.roleId,
     role,
-    employeeId: user.employeeId || null,
+    employeeId: employeeDoc
+      ? {
+          _id: employeeDoc._id,
+          employeeCode: employeeDoc.employeeCode,
+          fullName: employeeDoc.fullName,
+          jobTitle: employeeDoc.jobTitle,
+          employmentStatus: employeeDoc.employmentStatus,
+        }
+      : user.employeeId || null,
     isActive: user.isActive,
     lastLoginAt: user.lastLoginAt,
     permissionCodes,
@@ -52,17 +71,20 @@ async function storeRefreshToken(user, refreshToken, req) {
 }
 
 async function login(body, req) {
-  const user = await User.findOne({ emailAddress: body.emailAddress })
+  const loginValue = (body.emailAddress || body.username || '').toLowerCase().trim();
+  const user = await User.findOne({
+    $or: [{ emailAddress: loginValue }, { username: loginValue }],
+  })
     .select('+passwordHash +refreshTokens')
-    .populate('roleId', 'roleName isActive');
+    .populate('roleId', 'roleName roleDescription isActive');
 
   if (!user) {
-    throw new ApiError(401, 'Invalid email or password');
+    throw new ApiError(401, 'Invalid email, username or password');
   }
 
   const matched = await bcrypt.compare(body.password, user.passwordHash);
   if (!matched) {
-    throw new ApiError(401, 'Invalid email or password');
+    throw new ApiError(401, 'Invalid email, username or password');
   }
 
   if (!user.isActive) {
@@ -98,7 +120,7 @@ async function refresh(refreshToken, req) {
 
   const user = await User.findById(payload.sub)
     .select('+refreshTokens')
-    .populate('roleId', 'roleName isActive');
+    .populate('roleId', 'roleName roleDescription isActive');
 
   if (!user || !user.isActive) {
     throw new ApiError(401, 'Invalid refresh token');

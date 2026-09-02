@@ -15,6 +15,7 @@ const env = {
   admin: {
     fullName: process.env.ADMIN_FULL_NAME || 'Super Admin',
     emailAddress: (process.env.ADMIN_EMAIL || 'admin@brotherlpg.local').toLowerCase(),
+    username: (process.env.ADMIN_USERNAME || 'admin').toLowerCase(),
     password: process.env.ADMIN_PASSWORD || 'ChangeMe123!',
   },
 };
