@@ -20,6 +20,7 @@ function createMasterService({
   prepareUpdate,
   assertDelete,
   listMeta,
+  formOptions,
   hasIsActive = true,
 }) {
   function applyPopulate(query) {
@@ -91,7 +92,7 @@ function createMasterService({
       entityId: doc._id,
       newValues: payload,
     });
-    return getById(doc._id);
+    return loadById(doc._id);
   }
 
   async function list(query) {
@@ -124,7 +125,7 @@ function createMasterService({
     return result;
   }
 
-  async function getById(id) {
+  async function loadById(id) {
     let findQuery = Model.findById(id);
     findQuery = applyPopulate(findQuery);
     const doc = await findQuery;
@@ -132,6 +133,25 @@ function createMasterService({
       throw new ApiError(404, `${entityName} not found`);
     }
     return doc;
+  }
+
+  async function getFormOptions(query = {}) {
+    if (!formOptions) {
+      throw new ApiError(404, 'Form options are not available');
+    }
+    return formOptions(query);
+  }
+
+  async function getById(id) {
+    const doc = await loadById(id);
+    if (!formOptions) {
+      return doc;
+    }
+    const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+    return {
+      ...plain,
+      form: await formOptions({ id }),
+    };
   }
 
   async function update(id, body, req) {
@@ -161,7 +181,7 @@ function createMasterService({
       oldValues,
       newValues: payload,
     });
-    return getById(id);
+    return loadById(id);
   }
 
   async function remove(id, req) {
@@ -187,7 +207,14 @@ function createMasterService({
     });
   }
 
-  return { create, list, getById, update, remove };
+  return {
+    create,
+    list,
+    getById,
+    update,
+    remove,
+    ...(formOptions ? { getFormOptions } : {}),
+  };
 }
 
 module.exports = { createMasterService };

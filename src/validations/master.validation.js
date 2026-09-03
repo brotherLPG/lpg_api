@@ -15,7 +15,24 @@ const {
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORIES,
   UNITS_OF_MEASURE,
+  PAYMENT_TERM_DAYS,
 } = require('../constants/masters');
+
+const paymentTermDays = z.coerce
+  .number()
+  .int()
+  .refine((value) => PAYMENT_TERM_DAYS.includes(value), {
+    message: 'Invalid payment terms',
+  });
+
+const optionalIban = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => (value ? value.replace(/\s+/g, '').toUpperCase() : ''))
+  .refine((value) => !value || /^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(value), {
+    message: 'Invalid IBAN',
+  });
 
 const optionalDate = z.coerce.date().nullish();
 
@@ -36,14 +53,21 @@ const customerBody = {
 const supplierBody = {
   supplierCode: code.optional(),
   supplierName: z.string().trim().min(2).max(160),
-  contactPersonName: z.string().trim().max(120).optional(),
-  phoneNumber: z.string().trim().max(40).optional(),
+  contactPersonName: z.string().trim().min(2).max(120),
+  phoneNumber: z.string().trim().min(7).max(40),
   emailAddress: optionalEmail,
-  businessAddress: z.string().trim().max(400).optional(),
-  taxRegistrationNumber: z.string().trim().max(80).optional(),
-  paymentTermDays: z.coerce.number().int().min(0).optional(),
-  openingBalanceAmount: z.coerce.number().optional(),
   isActive: z.boolean().optional(),
+  paymentTermDays,
+  creditLimitAmount: nonNegative.optional(),
+  openingBalanceAmount: z.coerce.number().optional(),
+  businessAddress: z.string().trim().min(5).max(400),
+  city: z.string().trim().max(80).optional(),
+  stateProvince: z.string().trim().max(80).optional(),
+  taxRegistrationNumber: z.string().trim().max(80).optional(),
+  bankName: z.string().trim().max(120).optional(),
+  bankAccountTitle: z.string().trim().max(160).optional(),
+  bankAccountNumber: z.string().trim().max(40).optional(),
+  iban: optionalIban,
 };
 
 const cylinderTypeBody = {

@@ -20,12 +20,15 @@ const {
 } = require('../models');
 const ApiError = require('../utils/ApiError');
 const cache = require('../config/cache');
+const { nextSequentialCode } = require('../utils/nextCode');
 const { createMasterService } = require('./master.factory');
 const {
   TANK_STATUSES,
   ACCOUNT_TYPES,
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORIES,
+  PAYMENT_TERMS,
+  ACTIVE_STATUSES,
   ASSET_CATEGORIES,
   MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,
@@ -117,6 +120,14 @@ const customer = createMasterService({
   },
 });
 
+async function supplierFormOptions() {
+  return {
+    nextSupplierCode: await nextSequentialCode(Supplier, 'supplierCode', 'SUP'),
+    paymentTerms: PAYMENT_TERMS,
+    statuses: ACTIVE_STATUSES,
+  };
+}
+
 const supplier = createMasterService({
   Model: Supplier,
   entityName: 'Supplier',
@@ -124,7 +135,21 @@ const supplier = createMasterService({
   uniqueField: 'supplierCode',
   codePrefix: 'SUP',
   cachePrefix: 'suppliers:',
-  searchFields: ['supplierCode', 'supplierName', 'phoneNumber', 'emailAddress'],
+  searchFields: [
+    'supplierCode',
+    'supplierName',
+    'contactPersonName',
+    'phoneNumber',
+    'emailAddress',
+    'city',
+    'taxRegistrationNumber',
+    'bankName',
+  ],
+  listMeta: async () => ({
+    paymentTerms: PAYMENT_TERMS,
+    statuses: ACTIVE_STATUSES,
+  }),
+  formOptions: supplierFormOptions,
   assertDelete: async (doc) => {
     const used = await LPGReceipt.countDocuments({ supplierId: doc._id });
     const paid = await Payment.countDocuments({ supplierId: doc._id });

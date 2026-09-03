@@ -12,6 +12,15 @@ const MAINTENANCE_ASSET_STATUSES = ['operational', 'maintenance', 'breakdown', '
 const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection', 'emergency'];
 const ASSET_STATUSES = ['in-use', 'idle', 'under-maintenance', 'disposed'];
 const DEPRECIATION_METHODS = ['straight-line', 'reducing-balance', 'none'];
+const PAYMENT_TERM_DAYS = [0, 7, 15, 30, 45, 60, 90];
+const PAYMENT_TERMS = PAYMENT_TERM_DAYS.map((days) => ({
+  value: days,
+  label: days === 0 ? 'Due on Receipt' : `Net ${days} Days`,
+}));
+const ACTIVE_STATUSES = [
+  { value: true, label: 'Active' },
+  { value: false, label: 'Inactive' },
+];
 
 module.exports = {
   TANK_STATUSES,
@@ -28,4 +37,7 @@ module.exports = {
   MAINTENANCE_TYPES,
   ASSET_STATUSES,
   DEPRECIATION_METHODS,
+  PAYMENT_TERM_DAYS,
+  PAYMENT_TERMS,
+  ACTIVE_STATUSES,
 };

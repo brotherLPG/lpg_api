@@ -15,7 +15,7 @@ const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 
 const RECEIPT_POPULATE = [
-  { path: 'supplierId', select: 'supplierCode supplierName isActive' },
+  { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber city isActive' },
   { path: 'storageTankId', select: 'tankCode tankName capacityKg currentQuantityKg tankStatus' },
   { path: 'receivedByUserId', select: 'fullName emailAddress' },
 ];

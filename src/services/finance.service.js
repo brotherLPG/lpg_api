@@ -31,7 +31,7 @@ const RETURN_POPULATE = [
 
 const PAYMENT_POPULATE = [
   { path: 'customerId', select: 'customerCode customerName' },
-  { path: 'supplierId', select: 'supplierCode supplierName' },
+  { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber isActive' },
   { path: 'accountId', select: 'accountCode accountName accountType currentBalanceAmount' },
   { path: 'saleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount paymentStatus' },
   { path: 'receivedOrPaidByUserId', select: 'fullName emailAddress' },

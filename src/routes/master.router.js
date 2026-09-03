@@ -9,6 +9,9 @@ function createMasterRouter({ moduleName, controller, schemas, allowDelete = tru
 
   router.post('/', authorize(`${moduleName}.create`), validate(schemas.create), controller.create);
   router.get('/', authorize(`${moduleName}.read`), validate(schemas.list), controller.list);
+  if (controller.getFormOptions) {
+    router.get('/form-options', authorize(`${moduleName}.read`), controller.getFormOptions);
+  }
   router.get('/:id', authorize(`${moduleName}.read`), validate(schemas.idParam), controller.get);
   if (allowUpdate !== false) {
     router.patch('/:id', authorize(`${moduleName}.update`), validate(schemas.update), controller.update);

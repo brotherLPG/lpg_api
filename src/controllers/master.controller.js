@@ -2,7 +2,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { send } = require('../utils/apiResponse');
 
 function createMasterController(service, { singular, plural }) {
-  return {
+  const controller = {
     create: asyncHandler(async (req, res) => {
       const data = await service.create(req.body, req);
       send(res, 201, `${singular} created`, data);
@@ -25,6 +25,16 @@ function createMasterController(service, { singular, plural }) {
       send(res, 200, `${singular} deleted`);
     }),
   };
+
+  if (service.getFormOptions) {
+    controller.getFormOptions = asyncHandler(async (req, res) => {
+      const query = req.validated?.query || req.query;
+      const data = await service.getFormOptions(query);
+      send(res, 200, `${singular} form options fetched`, data);
+    });
+  }
+
+  return controller;
 }
 
 module.exports = { createMasterController };
