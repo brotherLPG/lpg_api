@@ -22,7 +22,7 @@ const RECEIPT_POPULATE = [
 
 const FILLING_POPULATE = [
   { path: 'storageTankId', select: 'tankCode tankName capacityKg currentQuantityKg tankStatus' },
-  { path: 'cylinderTypeId', select: 'typeCode typeName capacityKg isActive' },
+  { path: 'cylinderTypeId', select: 'typeCode typeName capacityKg cylinderCategory sellingPricePerCylinder isActive' },
   { path: 'operatorEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
   { path: 'createdByUserId', select: 'fullName emailAddress' },
 ];

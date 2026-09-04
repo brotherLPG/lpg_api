@@ -21,6 +21,42 @@ const ACTIVE_STATUSES = [
   { value: true, label: 'Active' },
   { value: false, label: 'Inactive' },
 ];
+const CYLINDER_CATEGORIES = [
+  { value: 'domestic', label: 'Domestic' },
+  { value: 'commercial', label: 'Commercial' },
+  { value: 'industrial', label: 'Industrial' },
+  { value: 'automotive', label: 'Automotive' },
+  { value: 'camping', label: 'Camping / Picnic' },
+];
+const CYLINDER_CATEGORY_VALUES = CYLINDER_CATEGORIES.map((item) => item.value);
+const CYLINDER_COLOR_CODES = [
+  { value: 'red', label: 'Red' },
+  { value: 'orange', label: 'Orange' },
+  { value: 'blue', label: 'Blue' },
+  { value: 'grey', label: 'Grey' },
+  { value: 'yellow', label: 'Yellow' },
+  { value: 'green', label: 'Green' },
+  { value: 'brown', label: 'Brown' },
+  { value: 'silver', label: 'Silver' },
+  { value: 'white', label: 'White' },
+  { value: 'black', label: 'Black' },
+];
+const CYLINDER_COLOR_VALUES = CYLINDER_COLOR_CODES.map((item) => item.value);
+const CYLINDER_VALVE_TYPES = [
+  { value: 'pol', label: 'POL' },
+  { value: 'compact', label: 'Compact' },
+  { value: 'clip-on', label: 'Clip-on' },
+  { value: 'acme', label: 'ACME' },
+  { value: 'opd', label: 'OPD' },
+  { value: 'camping', label: 'Camping Screw' },
+];
+const CYLINDER_VALVE_VALUES = CYLINDER_VALVE_TYPES.map((item) => item.value);
+const CYLINDER_MATERIALS = [
+  { value: 'steel', label: 'Steel' },
+  { value: 'aluminium', label: 'Aluminium' },
+  { value: 'composite', label: 'Composite' },
+];
+const CYLINDER_MATERIAL_VALUES = CYLINDER_MATERIALS.map((item) => item.value);
 
 module.exports = {
   TANK_STATUSES,
@@ -40,4 +76,12 @@ module.exports = {
   PAYMENT_TERM_DAYS,
   PAYMENT_TERMS,
   ACTIVE_STATUSES,
+  CYLINDER_CATEGORIES,
+  CYLINDER_CATEGORY_VALUES,
+  CYLINDER_COLOR_CODES,
+  CYLINDER_COLOR_VALUES,
+  CYLINDER_VALVE_TYPES,
+  CYLINDER_VALVE_VALUES,
+  CYLINDER_MATERIALS,
+  CYLINDER_MATERIAL_VALUES,
 };

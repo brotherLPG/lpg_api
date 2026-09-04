@@ -16,6 +16,10 @@ const {
   ITEM_CATEGORIES,
   UNITS_OF_MEASURE,
   PAYMENT_TERM_DAYS,
+  CYLINDER_CATEGORY_VALUES,
+  CYLINDER_COLOR_VALUES,
+  CYLINDER_VALVE_VALUES,
+  CYLINDER_MATERIAL_VALUES,
 } = require('../constants/masters');
 
 const paymentTermDays = z.coerce
@@ -34,6 +38,11 @@ const optionalIban = z
     message: 'Invalid IBAN',
   });
 
+const optionalEnum = (values) =>
+  z.preprocess(
+    (value) => (value === '' || value === undefined || value === null ? undefined : value),
+    z.enum(values).optional()
+  );
 const optionalDate = z.coerce.date().nullish();
 
 const customerBody = {
@@ -73,10 +82,19 @@ const supplierBody = {
 const cylinderTypeBody = {
   typeCode: code.optional(),
   typeName: z.string().trim().min(2).max(120),
+  cylinderCategory: z.enum(CYLINDER_CATEGORY_VALUES),
   capacityKg: positiveKg,
-  tareWeightKg: nonNegative.optional(),
-  sellingPricePerCylinder: nonNegative.optional(),
+  tareWeightKg: nonNegative,
+  colorCode: optionalEnum(CYLINDER_COLOR_VALUES),
   isActive: z.boolean().optional(),
+  sellingPricePerCylinder: nonNegative,
+  purchasePriceAmount: nonNegative.optional(),
+  refillPriceAmount: nonNegative.optional(),
+  securityDepositAmount: nonNegative.optional(),
+  description: z.string().trim().max(1000).optional(),
+  valveType: optionalEnum(CYLINDER_VALVE_VALUES),
+  material: optionalEnum(CYLINDER_MATERIAL_VALUES),
+  safetyCertificationNumber: z.string().trim().max(80).optional(),
 };
 
 const storageTankCreateBody = {
@@ -189,7 +207,9 @@ const supplier = {
 const cylinderType = {
   create: createSchema(cylinderTypeBody),
   update: createUpdateSchema(cylinderTypeBody),
-  list: listMasterQuery(),
+  list: listMasterQuery({
+    cylinderCategory: z.enum(CYLINDER_CATEGORY_VALUES).optional(),
+  }),
   idParam: idParamSchema,
 };
 

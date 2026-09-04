@@ -34,8 +34,10 @@ async function seedMasters() {
   const cyl11 = await upsert(CylinderType, { typeCode: 'CYL-11' }, {
     typeCode: 'CYL-11',
     typeName: '11 KG Cylinder',
+    cylinderCategory: 'domestic',
     capacityKg: 11,
-    tareWeightKg: 0,
+    tareWeightKg: 8.5,
+    colorCode: 'red',
     sellingPricePerCylinder: 0,
     isActive: true,
   });
@@ -43,8 +45,10 @@ async function seedMasters() {
   const cyl22 = await upsert(CylinderType, { typeCode: 'CYL-22' }, {
     typeCode: 'CYL-22',
     typeName: '22 KG Cylinder',
+    cylinderCategory: 'commercial',
     capacityKg: 22,
-    tareWeightKg: 0,
+    tareWeightKg: 17,
+    colorCode: 'red',
     sellingPricePerCylinder: 0,
     isActive: true,
   });

@@ -180,7 +180,7 @@ async function buildSaleLines(rawLines, session) {
   const lines = [];
   for (const raw of rawLines) {
     const item = await InventoryItem.findById(raw.inventoryItemId)
-      .populate('cylinderTypeId', 'sellingPricePerCylinder typeName')
+      .populate('cylinderTypeId', 'sellingPricePerCylinder refillPriceAmount typeName typeCode')
       .session(session);
     if (!item) throw new ApiError(400, 'InventoryItem not found');
     if (!item.isActive) throw new ApiError(400, `Inventory item ${item.itemCode} is inactive`);

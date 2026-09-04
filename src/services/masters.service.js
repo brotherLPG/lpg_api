@@ -29,6 +29,10 @@ const {
   ITEM_CATEGORIES,
   PAYMENT_TERMS,
   ACTIVE_STATUSES,
+  CYLINDER_CATEGORIES,
+  CYLINDER_COLOR_CODES,
+  CYLINDER_VALVE_TYPES,
+  CYLINDER_MATERIALS,
   ASSET_CATEGORIES,
   MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,
@@ -166,8 +170,28 @@ const cylinderType = createMasterService({
   uniqueField: 'typeCode',
   codePrefix: 'CYL',
   cachePrefix: 'cylinder-types:',
-  searchFields: ['typeCode', 'typeName'],
+  searchFields: ['typeCode', 'typeName', 'cylinderCategory', 'colorCode', 'safetyCertificationNumber'],
   sort: { capacityKg: 1 },
+  extraFilters: (query) => {
+    const filter = {};
+    if (query.cylinderCategory) filter.cylinderCategory = query.cylinderCategory;
+    return filter;
+  },
+  listMeta: async () => ({
+    categories: CYLINDER_CATEGORIES,
+    colorCodes: CYLINDER_COLOR_CODES,
+    valveTypes: CYLINDER_VALVE_TYPES,
+    materials: CYLINDER_MATERIALS,
+    statuses: ACTIVE_STATUSES,
+  }),
+  formOptions: async () => ({
+    nextTypeCode: await nextSequentialCode(CylinderType, 'typeCode', 'CYL'),
+    categories: CYLINDER_CATEGORIES,
+    colorCodes: CYLINDER_COLOR_CODES,
+    valveTypes: CYLINDER_VALVE_TYPES,
+    materials: CYLINDER_MATERIALS,
+    statuses: ACTIVE_STATUSES,
+  }),
   assertDelete: async (doc) => {
     const inUse = await InventoryItem.countDocuments({ cylinderTypeId: doc._id });
     if (inUse > 0) {
@@ -226,7 +250,7 @@ const inventoryItem = createMasterService({
   uniqueField: 'itemCode',
   codePrefix: 'ITM',
   cachePrefix: 'inventory-items:',
-  populate: [{ path: 'cylinderTypeId', select: 'typeCode typeName capacityKg isActive' }],
+  populate: [{ path: 'cylinderTypeId', select: 'typeCode typeName capacityKg cylinderCategory sellingPricePerCylinder isActive' }],
   searchFields: ['itemCode', 'itemName'],
   extraFilters: (query) => {
     const filter = {};
