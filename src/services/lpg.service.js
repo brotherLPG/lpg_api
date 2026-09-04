@@ -19,6 +19,7 @@ const RECEIPT_POPULATE = [
   { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber city isActive' },
   { path: 'storageTankId', select: 'tankCode tankName capacityKg currentQuantityKg tankStatus' },
   { path: 'receivedByUserId', select: 'fullName emailAddress' },
+  { path: 'receivedByEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
 ];
 
 const FILLING_POPULATE = [
@@ -60,8 +61,24 @@ function receiptStatusLabel(status) {
   return RECEIPT_STATUSES.find((item) => item.value === status)?.label || 'Confirmed';
 }
 
+function employeeLabel(employee) {
+  if (!employee || !employee.fullName) return '';
+  return employee.jobTitle ? `${employee.fullName} (${employee.jobTitle})` : employee.fullName;
+}
+
+function resolveReceiptStatus(body, fallback = 'confirmed') {
+  if (body.saveAsDraft === true) return 'pending';
+  if (body.receiptStatus) return body.receiptStatus;
+  return fallback;
+}
+
 function toReceiptItem(doc) {
   const receiptStatus = receiptStatusOf(doc);
+  const tank = doc.storageTankId && doc.storageTankId.tankCode ? doc.storageTankId : null;
+  const employee = doc.receivedByEmployeeId && doc.receivedByEmployeeId.fullName
+    ? doc.receivedByEmployeeId
+    : null;
+
   return {
     _id: doc._id,
     receiptNumber: doc.receiptNumber,
@@ -84,6 +101,25 @@ function toReceiptItem(doc) {
     supplierInvoiceNumber: doc.supplierInvoiceNumber || '',
     remarks: doc.remarks || '',
     receivedByUserId: doc.receivedByUserId,
+    receivedByEmployeeId: employee
+      ? {
+          _id: employee._id,
+          employeeCode: employee.employeeCode,
+          fullName: employee.fullName,
+          jobTitle: employee.jobTitle || '',
+        }
+      : doc.receivedByEmployeeId || null,
+    receivedByEmployeeName: employeeLabel(employee),
+    storageTankId: tank?._id || doc.storageTankId || null,
+    tank: tank
+      ? {
+          _id: tank._id,
+          tankCode: tank.tankCode,
+          tankName: tank.tankName,
+          currentQuantityKg: tank.currentQuantityKg,
+          capacityKg: tank.capacityKg,
+        }
+      : null,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -244,12 +280,59 @@ function populateQuery(query, paths) {
   return query;
 }
 
+async function getReceiptFormOptions() {
+  const [suppliers, employees, tank, nextReceiptNumber] = await Promise.all([
+    Supplier.find({ isActive: true }).select('supplierCode supplierName contactPersonName').sort({ supplierName: 1 }).lean(),
+    Employee.find({ employmentStatus: { $ne: 'terminated' } })
+      .select('employeeCode fullName jobTitle employmentStatus')
+      .sort({ fullName: 1 })
+      .lean(),
+    StorageTank.findOne().sort({ createdAt: 1 }).lean(),
+    nextSequentialCode(LPGReceipt, 'receiptNumber', 'RCP'),
+  ]);
+
+  if (!tank) {
+    throw new ApiError(400, 'No storage tank is configured');
+  }
+
+  return {
+    nextReceiptNumber,
+    suppliers: suppliers.map((supplier) => ({
+      _id: supplier._id,
+      supplierCode: supplier.supplierCode,
+      supplierName: supplier.supplierName,
+    })),
+    employees: employees.map((employee) => ({
+      _id: employee._id,
+      employeeCode: employee.employeeCode,
+      fullName: employee.fullName,
+      jobTitle: employee.jobTitle || '',
+      displayName: employeeLabel(employee),
+    })),
+    tank: {
+      _id: tank._id,
+      tankCode: tank.tankCode,
+      tankName: tank.tankName,
+      currentQuantityKg: tank.currentQuantityKg,
+      capacityKg: tank.capacityKg,
+      availableCapacityKg: roundMoney((tank.capacityKg || 0) - (tank.currentQuantityKg || 0)),
+      tankStatus: tank.tankStatus,
+    },
+  };
+}
+
 async function getReceiptById(id) {
-  const doc = await populateQuery(LPGReceipt.findById(id), RECEIPT_POPULATE);
+  const [doc, form] = await Promise.all([
+    populateQuery(LPGReceipt.findById(id), RECEIPT_POPULATE),
+    getReceiptFormOptions(),
+  ]);
   if (!doc) {
     throw new ApiError(404, 'LPGReceipt not found');
   }
-  return toReceiptItem(doc);
+  return {
+    ...toReceiptItem(doc),
+    form,
+  };
 }
 
 async function getFillingById(id) {
@@ -356,32 +439,39 @@ async function listFillings(query) {
 async function createReceipt(body, req) {
   const result = await withTransaction(async (session) => {
     await assertSupplier(body.supplierId, session);
-    const storageTankId = await resolveTankId(body.storageTankId, session);
+    await assertEmployee(body.receivedByEmployeeId, session);
+    const tank = await StorageTank.findById(await resolveTankId(body.storageTankId, session)).session(session);
+    if (!tank) {
+      throw new ApiError(400, 'No storage tank is configured');
+    }
+    await assertTank(tank._id, session);
 
     const receiptNumber = await assignNumber(LPGReceipt, 'receiptNumber', 'RCP', body.receiptNumber, session);
     const receivedQuantityKg = body.receivedQuantityKg;
-    const purchaseRatePerKg = body.purchaseRatePerKg || 0;
-    const receiptStatus = body.receiptStatus || 'confirmed';
+    const purchaseRatePerKg = body.purchaseRatePerKg;
+    const receiptStatus = resolveReceiptStatus(body, 'confirmed');
+    const quantityBeforeKg = tank.currentQuantityKg || 0;
     const payload = {
       receiptNumber,
       supplierId: body.supplierId,
-      storageTankId,
+      storageTankId: tank._id,
       receivedQuantityKg,
       purchaseRatePerKg,
       totalPurchaseAmount: computePurchaseAmount(receivedQuantityKg, purchaseRatePerKg),
-      truckRegistrationNumber: body.truckRegistrationNumber || '',
+      truckRegistrationNumber: body.truckRegistrationNumber,
       receivedAt: body.receivedAt || new Date(),
-      supplierInvoiceNumber: body.supplierInvoiceNumber || '',
+      supplierInvoiceNumber: body.supplierInvoiceNumber,
       receivedByUserId: req.user._id,
+      receivedByEmployeeId: body.receivedByEmployeeId,
       remarks: body.remarks || '',
       receiptStatus,
     };
 
     const [doc] = await LPGReceipt.create([payload], { session });
-    let tankQuantityAfterKg = null;
+    let quantityAfterKg = quantityBeforeKg;
     if (receiptStatus === 'confirmed') {
-      const tank = await incrementTank(storageTankId, receivedQuantityKg, session);
-      tankQuantityAfterKg = tank.currentQuantityKg;
+      const updatedTank = await incrementTank(tank._id, receivedQuantityKg, session);
+      quantityAfterKg = updatedTank.currentQuantityKg;
     }
 
     await writeAudit({
@@ -393,16 +483,29 @@ async function createReceipt(body, req) {
       entityId: doc._id,
       newValues: {
         ...payload,
-        tankQuantityAfterKg,
+        tankQuantityAfterKg: quantityAfterKg,
       },
     });
 
-    return { id: doc._id, tankQuantityAfterKg };
+    return {
+      id: doc._id,
+      inventoryUpdate: {
+        tankCode: tank.tankCode,
+        tankName: tank.tankName,
+        quantityBeforeKg,
+        quantityAfterKg,
+        applied: receiptStatus === 'confirmed',
+      },
+    };
   });
 
   invalidateOps();
   const receipt = await getReceiptById(result.id);
-  return { ...receipt, tankQuantityAfterKg: result.tankQuantityAfterKg };
+  return {
+    ...receipt,
+    tankQuantityAfterKg: result.inventoryUpdate.quantityAfterKg,
+    inventoryUpdate: result.inventoryUpdate,
+  };
 }
 
 async function updateReceipt(id, body, req) {
@@ -424,10 +527,13 @@ async function updateReceipt(id, body, req) {
     const nextQty = body.receivedQuantityKg ?? existing.receivedQuantityKg;
     const nextRate = body.purchaseRatePerKg ?? existing.purchaseRatePerKg;
     const previousStatus = receiptStatusOf(existing);
-    const nextStatus = body.receiptStatus || previousStatus;
+    const nextStatus = resolveReceiptStatus(body, previousStatus);
 
     if (String(nextSupplierId) !== String(existing.supplierId)) {
       await assertSupplier(nextSupplierId, session);
+    }
+    if (body.receivedByEmployeeId && String(body.receivedByEmployeeId) !== String(existing.receivedByEmployeeId)) {
+      await assertEmployee(body.receivedByEmployeeId, session);
     }
 
     const qtyChanged = nextQty !== existing.receivedQuantityKg;
@@ -459,6 +565,7 @@ async function updateReceipt(id, body, req) {
     existing.purchaseRatePerKg = nextRate;
     existing.totalPurchaseAmount = computePurchaseAmount(nextQty, nextRate);
     existing.receiptStatus = nextStatus;
+    if (body.receivedByEmployeeId !== undefined) existing.receivedByEmployeeId = body.receivedByEmployeeId;
     if (body.truckRegistrationNumber !== undefined) existing.truckRegistrationNumber = body.truckRegistrationNumber;
     if (body.receivedAt !== undefined) existing.receivedAt = body.receivedAt;
     if (body.supplierInvoiceNumber !== undefined) existing.supplierInvoiceNumber = body.supplierInvoiceNumber;
@@ -663,6 +770,7 @@ const receipt = {
   list: listReceipts,
   getById: getReceiptById,
   update: updateReceipt,
+  getFormOptions: getReceiptFormOptions,
 };
 
 const filling = {

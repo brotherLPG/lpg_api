@@ -18,12 +18,14 @@ const receiptCreateBody = {
   supplierId: objectId,
   storageTankId: objectId.optional(),
   receivedQuantityKg: positiveKg,
-  purchaseRatePerKg: nonNegative.optional(),
-  truckRegistrationNumber: z.string().trim().max(40).optional(),
+  purchaseRatePerKg: nonNegative,
+  truckRegistrationNumber: z.string().trim().min(3).max(40),
   receivedAt: optionalDate,
-  supplierInvoiceNumber: z.string().trim().max(80).optional(),
-  remarks: z.string().trim().max(500).optional(),
+  supplierInvoiceNumber: z.string().trim().min(2).max(80),
+  receivedByEmployeeId: objectId,
+  remarks: z.string().trim().max(1000).optional(),
   receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
+  saveAsDraft: z.boolean().optional(),
 };
 
 const receiptUpdateBody = {
@@ -32,11 +34,13 @@ const receiptUpdateBody = {
   storageTankId: objectId.optional(),
   receivedQuantityKg: positiveKg.optional(),
   purchaseRatePerKg: nonNegative.optional(),
-  truckRegistrationNumber: z.string().trim().max(40).optional(),
+  truckRegistrationNumber: z.string().trim().min(3).max(40).optional(),
   receivedAt: optionalDate,
-  supplierInvoiceNumber: z.string().trim().max(80).optional(),
-  remarks: z.string().trim().max(500).optional(),
+  supplierInvoiceNumber: z.string().trim().min(2).max(80).optional(),
+  receivedByEmployeeId: objectId.optional(),
+  remarks: z.string().trim().max(1000).optional(),
   receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
+  saveAsDraft: z.boolean().optional(),
 };
 
 const fillingCreateBody = {

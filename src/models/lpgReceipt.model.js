@@ -36,6 +36,11 @@ const lpgReceiptSchema = new mongoose.Schema(
       ref: 'User',
       required: [true, 'receivedByUserId is required'],
     },
+    receivedByEmployeeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Employee',
+      default: null,
+    },
     remarks: { type: String, trim: true, default: '' },
     receiptStatus: {
       type: String,
