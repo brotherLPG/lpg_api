@@ -26,7 +26,9 @@ const {
   TANK_STATUSES,
   ACCOUNT_TYPES,
   EMPLOYMENT_STATUSES,
-  ITEM_CATEGORIES,
+  ITEM_CATEGORY_OPTIONS,
+  UNIT_OF_MEASURE_OPTIONS,
+  STOCK_STATUSES,
   PAYMENT_TERMS,
   ACTIVE_STATUSES,
   CYLINDER_CATEGORIES,
@@ -360,6 +362,260 @@ async function getTankDashboard(query = {}) {
 
 storageTank.getDashboard = getTankDashboard;
 
+const CYLINDER_ITEM_CATEGORIES = ['filled-cylinder', 'empty-cylinder'];
+
+async function assertActiveSupplier(supplierId) {
+  if (!supplierId) return null;
+  const supplier = await Supplier.findById(supplierId).select('supplierCode supplierName isActive');
+  if (!supplier) {
+    throw new ApiError(400, 'Supplier not found');
+  }
+  if (!supplier.isActive) {
+    throw new ApiError(400, 'Supplier is inactive');
+  }
+  return supplier;
+}
+
+async function assertUniqueCylinderStock(itemCategory, cylinderTypeId, excludeId) {
+  if (!CYLINDER_ITEM_CATEGORIES.includes(itemCategory) || !cylinderTypeId) {
+    return;
+  }
+  const filter = { itemCategory, cylinderTypeId };
+  if (excludeId) {
+    filter._id = { $ne: excludeId };
+  }
+  const exists = await InventoryItem.findOne(filter).select('itemCode');
+  if (exists) {
+    throw new ApiError(409, `An inventory item already exists for this cylinder type (${exists.itemCode})`);
+  }
+}
+
+function stockStatusOf(item) {
+  const qty = Number(item.currentQuantity) || 0;
+  const min = Number(item.minimumStockLevel) || 0;
+  if (qty <= 0) {
+    return { stockStatus: 'out-of-stock', stockStatusLabel: 'Out of Stock' };
+  }
+  if (min > 0 && qty <= min) {
+    return { stockStatus: 'low-stock', stockStatusLabel: 'Low Stock' };
+  }
+  return { stockStatus: 'in-stock', stockStatusLabel: 'In Stock' };
+}
+
+function stockStatusFilter(stockStatus) {
+  if (stockStatus === 'out-of-stock') {
+    return { currentQuantity: { $lte: 0 } };
+  }
+  if (stockStatus === 'low-stock') {
+    return {
+      $expr: {
+        $and: [
+          { $gt: ['$currentQuantity', 0] },
+          { $gt: ['$minimumStockLevel', 0] },
+          { $lte: ['$currentQuantity', '$minimumStockLevel'] },
+        ],
+      },
+    };
+  }
+  if (stockStatus === 'in-stock') {
+    return {
+      $expr: {
+        $and: [
+          { $gt: ['$currentQuantity', 0] },
+          {
+            $or: [
+              { $lte: ['$minimumStockLevel', 0] },
+              { $gt: ['$currentQuantity', '$minimumStockLevel'] },
+            ],
+          },
+        ],
+      },
+    };
+  }
+  return {};
+}
+
+function categoryLabelOf(itemCategory) {
+  return ITEM_CATEGORY_OPTIONS.find((item) => item.value === itemCategory)?.label || titleCase(itemCategory);
+}
+
+function unitLabelOf(unitOfMeasure) {
+  return UNIT_OF_MEASURE_OPTIONS.find((item) => item.value === unitOfMeasure)?.label || unitOfMeasure;
+}
+
+function cylinderVolumeOf(type) {
+  if (type?.capacityKg == null) return 'N/A';
+  return `${formatKg(type.capacityKg)} KG`;
+}
+
+function cylinderCardHint(item, status) {
+  if (item.itemCategory === 'filled-cylinder') {
+    if (status.stockStatus === 'low-stock' || status.stockStatus === 'out-of-stock') {
+      return 'Below operational buffer';
+    }
+    if (item.cylinderTypeId?.cylinderCategory === 'commercial') {
+      return 'Ready for commercial delivery';
+    }
+    return 'Normal operational levels';
+  }
+  if (item.itemCategory === 'empty-cylinder') {
+    if (status.stockStatus === 'low-stock' || status.stockStatus === 'out-of-stock') {
+      return 'Requires bulk collection run';
+    }
+    return 'Sufficient for next 2 batches';
+  }
+  return '';
+}
+
+function cylinderCardTitle(item, type) {
+  const cap = type?.capacityKg != null ? `${formatKg(type.capacityKg)}KG` : '';
+  if (item.itemCategory === 'filled-cylinder') {
+    return cap ? `Filled ${cap} Cylinders` : item.itemName;
+  }
+  if (item.itemCategory === 'empty-cylinder') {
+    return cap ? `Empty ${cap} Cylinders` : item.itemName;
+  }
+  return item.itemName;
+}
+
+function mapInventoryItem(item) {
+  const type = item.cylinderTypeId && typeof item.cylinderTypeId === 'object' ? item.cylinderTypeId : null;
+  const supplier = item.preferredSupplierId && typeof item.preferredSupplierId === 'object'
+    ? item.preferredSupplierId
+    : null;
+  const status = stockStatusOf(item);
+
+  return {
+    _id: item._id,
+    itemCode: item.itemCode,
+    itemName: item.itemName,
+    itemCategory: item.itemCategory,
+    categoryLabel: categoryLabelOf(item.itemCategory),
+    description: item.description || '',
+    unitOfMeasure: item.unitOfMeasure,
+    unitOfMeasureLabel: unitLabelOf(item.unitOfMeasure),
+    cylinderTypeId: type?._id || item.cylinderTypeId || null,
+    cylinderTypeName: type?.typeName || '',
+    capacityKg: type?.capacityKg ?? null,
+    cylinderVolume: cylinderVolumeOf(type),
+    currentQuantity: item.currentQuantity || 0,
+    minimumStockLevel: item.minimumStockLevel || 0,
+    maximumStockLevel: item.maximumStockLevel || 0,
+    reorderQuantity: item.reorderQuantity || 0,
+    preferredSupplierId: supplier?._id || item.preferredSupplierId || null,
+    preferredSupplierName: supplier?.supplierName || '',
+    unitPurchasePriceAmount: item.unitPurchasePriceAmount || 0,
+    unitSellingPriceAmount: item.unitSellingPriceAmount || 0,
+    lastPurchaseDate: item.lastPurchaseDate || null,
+    rackBayNumber: item.rackBayNumber || '',
+    storageNotes: item.storageNotes || '',
+    isActive: item.isActive !== false,
+    ...status,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  };
+}
+
+async function inventoryListSummary() {
+  const items = await InventoryItem.find({
+    itemCategory: { $in: CYLINDER_ITEM_CATEGORIES },
+    isActive: true,
+  })
+    .populate('cylinderTypeId', 'typeCode typeName capacityKg cylinderCategory')
+    .sort({ itemCategory: 1 })
+    .lean();
+
+  const cylinderCards = items
+    .map((item) => {
+      const type = item.cylinderTypeId && typeof item.cylinderTypeId === 'object' ? item.cylinderTypeId : null;
+      const status = stockStatusOf(item);
+      return {
+        itemId: item._id,
+        itemCode: item.itemCode,
+        itemName: item.itemName,
+        title: cylinderCardTitle(item, type),
+        itemCategory: item.itemCategory,
+        categoryLabel: categoryLabelOf(item.itemCategory),
+        capacityKg: type?.capacityKg ?? null,
+        currentQuantity: item.currentQuantity || 0,
+        hint: cylinderCardHint(item, status),
+        ...status,
+      };
+    })
+    .sort((a, b) => {
+      const categoryOrder = Number(a.itemCategory === 'empty-cylinder') - Number(b.itemCategory === 'empty-cylinder');
+      if (categoryOrder !== 0) return categoryOrder;
+      return (a.capacityKg || 0) - (b.capacityKg || 0);
+    });
+
+  return { cylinderCards };
+}
+
+async function inventoryFormOptions() {
+  const [nextItemCode, cylinderTypes, suppliers] = await Promise.all([
+    nextSequentialCode(InventoryItem, 'itemCode', 'ITM'),
+    CylinderType.find({ isActive: true })
+      .select('typeCode typeName capacityKg cylinderCategory')
+      .sort({ capacityKg: 1 })
+      .lean(),
+    Supplier.find({ isActive: true })
+      .select('supplierCode supplierName')
+      .sort({ supplierName: 1 })
+      .lean(),
+  ]);
+
+  return {
+    nextItemCode,
+    categories: ITEM_CATEGORY_OPTIONS,
+    unitsOfMeasure: UNIT_OF_MEASURE_OPTIONS,
+    stockStatuses: STOCK_STATUSES,
+    statuses: ACTIVE_STATUSES,
+    cylinderTypes: cylinderTypes.map((type) => ({
+      _id: type._id,
+      typeCode: type.typeCode,
+      typeName: type.typeName,
+      capacityKg: type.capacityKg,
+      cylinderCategory: type.cylinderCategory,
+      label: `${type.typeName} (${formatKg(type.capacityKg)} KG)`,
+      volumeLabel: `${formatKg(type.capacityKg)} KG`,
+    })),
+    suppliers: suppliers.map((supplier) => ({
+      _id: supplier._id,
+      supplierCode: supplier.supplierCode,
+      supplierName: supplier.supplierName,
+    })),
+  };
+}
+
+async function prepareInventoryPayload(body, existing = {}) {
+  const category = body.itemCategory ?? existing.itemCategory;
+
+  if (CYLINDER_ITEM_CATEGORIES.includes(category)) {
+    const cylinderTypeId = body.cylinderTypeId !== undefined ? body.cylinderTypeId : existing.cylinderTypeId;
+    if (!cylinderTypeId) {
+      throw new ApiError(400, 'cylinderTypeId is required for cylinder inventory items');
+    }
+    await assertActiveCylinderType(cylinderTypeId);
+    await assertUniqueCylinderStock(category, cylinderTypeId, existing._id);
+    if (body.unitOfMeasure === undefined && !existing.unitOfMeasure) {
+      body.unitOfMeasure = 'PCS';
+    }
+  } else if (body.itemCategory !== undefined || body.cylinderTypeId !== undefined) {
+    body.cylinderTypeId = null;
+  }
+
+  if (body.preferredSupplierId) {
+    await assertActiveSupplier(body.preferredSupplierId);
+  }
+
+  if (body.currentQuantity === undefined && !existing._id) {
+    body.currentQuantity = 0;
+  }
+
+  assertStockLevels(body, existing);
+  return body;
+}
+
 const inventoryItem = createMasterService({
   Model: InventoryItem,
   entityName: 'InventoryItem',
@@ -367,29 +623,29 @@ const inventoryItem = createMasterService({
   uniqueField: 'itemCode',
   codePrefix: 'ITM',
   cachePrefix: 'inventory-items:',
-  populate: [{ path: 'cylinderTypeId', select: 'typeCode typeName capacityKg cylinderCategory sellingPricePerCylinder isActive' }],
-  searchFields: ['itemCode', 'itemName'],
+  populate: [
+    { path: 'cylinderTypeId', select: 'typeCode typeName capacityKg cylinderCategory sellingPricePerCylinder isActive' },
+    { path: 'preferredSupplierId', select: 'supplierCode supplierName isActive' },
+  ],
+  searchFields: ['itemCode', 'itemName', 'description', 'rackBayNumber'],
   extraFilters: (query) => {
     const filter = {};
     if (query.itemCategory) filter.itemCategory = query.itemCategory;
     if (query.cylinderTypeId) filter.cylinderTypeId = query.cylinderTypeId;
+    Object.assign(filter, stockStatusFilter(query.stockStatus));
     return filter;
   },
+  mapItem: mapInventoryItem,
   listMeta: async () => ({
-    itemCategories: ITEM_CATEGORIES,
+    categories: ITEM_CATEGORY_OPTIONS,
+    stockStatuses: STOCK_STATUSES,
+    unitsOfMeasure: UNIT_OF_MEASURE_OPTIONS,
+    statuses: ACTIVE_STATUSES,
   }),
-  prepareCreate: async (body) => {
-    await assertActiveCylinderType(body.cylinderTypeId);
-    assertStockLevels(body);
-    return body;
-  },
-  prepareUpdate: async (body, doc) => {
-    if (body.cylinderTypeId !== undefined) {
-      await assertActiveCylinderType(body.cylinderTypeId);
-    }
-    assertStockLevels(body, doc);
-    return body;
-  },
+  listSummary: inventoryListSummary,
+  formOptions: inventoryFormOptions,
+  prepareCreate: async (body) => prepareInventoryPayload(body),
+  prepareUpdate: async (body, doc) => prepareInventoryPayload(body, doc),
   assertDelete: async (doc) => {
     if (doc.currentQuantity !== 0) {
       throw new ApiError(400, 'InventoryItem still has stock and cannot be deleted');

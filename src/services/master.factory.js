@@ -20,6 +20,8 @@ function createMasterService({
   prepareUpdate,
   assertDelete,
   listMeta,
+  listSummary,
+  mapItem,
   formOptions,
   hasIsActive = true,
 }) {
@@ -92,7 +94,13 @@ function createMasterService({
       entityId: doc._id,
       newValues: payload,
     });
-    return loadById(doc._id);
+    return toResponse(await loadById(doc._id));
+  }
+
+  function toResponse(doc) {
+    if (!mapItem || !doc) return doc;
+    const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+    return mapItem(plain);
   }
 
   async function list(query) {
@@ -118,9 +126,13 @@ function createMasterService({
       Model.countDocuments(filter),
     ]);
 
-    const result = paginated(items, total, page, limit);
+    const mapped = mapItem ? items.map(mapItem) : items;
+    const result = paginated(mapped, total, page, limit);
     if (listMeta) {
       result.meta = await listMeta(query);
+    }
+    if (listSummary) {
+      result.summary = await listSummary(query);
     }
     return result;
   }
@@ -144,12 +156,12 @@ function createMasterService({
 
   async function getById(id) {
     const doc = await loadById(id);
+    const mapped = toResponse(doc);
     if (!formOptions) {
-      return doc;
+      return mapped;
     }
-    const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
     return {
-      ...plain,
+      ...mapped,
       form: await formOptions({ id }),
     };
   }
@@ -181,7 +193,7 @@ function createMasterService({
       oldValues,
       newValues: payload,
     });
-    return loadById(id);
+    return toResponse(await loadById(id));
   }
 
   async function remove(id, req) {

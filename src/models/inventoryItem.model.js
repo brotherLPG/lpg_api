@@ -29,9 +29,21 @@ const inventoryItemSchema = new mongoose.Schema(
       ref: 'CylinderType',
       default: null,
     },
-    currentQuantity: { type: Number, default: 0 },
+    description: { type: String, trim: true, default: '' },
+    currentQuantity: { type: Number, min: 0, default: 0 },
     minimumStockLevel: { type: Number, min: 0, default: 0 },
     maximumStockLevel: { type: Number, min: 0, default: 0 },
+    reorderQuantity: { type: Number, min: 0, default: 0 },
+    preferredSupplierId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Supplier',
+      default: null,
+    },
+    unitPurchasePriceAmount: { type: Number, min: 0, default: 0 },
+    unitSellingPriceAmount: { type: Number, min: 0, default: 0 },
+    lastPurchaseDate: { type: Date, default: null },
+    rackBayNumber: { type: String, trim: true, default: '' },
+    storageNotes: { type: String, trim: true, default: '' },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
@@ -39,5 +51,7 @@ const inventoryItemSchema = new mongoose.Schema(
 
 inventoryItemSchema.index({ itemCategory: 1, isActive: 1 });
 inventoryItemSchema.index({ cylinderTypeId: 1 });
+inventoryItemSchema.index({ preferredSupplierId: 1 });
+inventoryItemSchema.index({ itemCategory: 1, cylinderTypeId: 1 });
 
 module.exports = mongoose.model('InventoryItem', inventoryItemSchema);

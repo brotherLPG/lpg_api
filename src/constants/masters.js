@@ -2,7 +2,25 @@ const TANK_STATUSES = ['operational', 'maintenance', 'decommissioned'];
 const ACCOUNT_TYPES = ['cash', 'bank', 'receivable', 'payable', 'income', 'expense', 'equity'];
 const EMPLOYMENT_STATUSES = ['active', 'inactive', 'terminated'];
 const ITEM_CATEGORIES = ['filled-cylinder', 'empty-cylinder', 'lpg', 'spare', 'other'];
+const ITEM_CATEGORY_OPTIONS = [
+  { value: 'filled-cylinder', label: 'Filled Cylinder' },
+  { value: 'empty-cylinder', label: 'Empty Cylinder' },
+  { value: 'spare', label: 'Spare Parts' },
+  { value: 'lpg', label: 'LPG' },
+  { value: 'other', label: 'Other' },
+];
 const UNITS_OF_MEASURE = ['KG', 'PCS', 'LTR'];
+const UNIT_OF_MEASURE_OPTIONS = [
+  { value: 'PCS', label: 'Unit' },
+  { value: 'KG', label: 'KG' },
+  { value: 'LTR', label: 'Litre' },
+];
+const STOCK_STATUSES = [
+  { value: 'in-stock', label: 'In Stock' },
+  { value: 'low-stock', label: 'Low Stock' },
+  { value: 'out-of-stock', label: 'Out of Stock' },
+];
+const STOCK_STATUS_VALUES = STOCK_STATUSES.map((item) => item.value);
 const SALE_STATUSES = ['confirmed', 'partially-returned', 'returned', 'cancelled'];
 const PAYMENT_STATUSES = ['unpaid', 'partial', 'paid', 'refund-due'];
 const PAYMENT_TYPES = ['receive', 'pay', 'refund'];
@@ -73,7 +91,11 @@ module.exports = {
   ACCOUNT_TYPES,
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORIES,
+  ITEM_CATEGORY_OPTIONS,
   UNITS_OF_MEASURE,
+  UNIT_OF_MEASURE_OPTIONS,
+  STOCK_STATUSES,
+  STOCK_STATUS_VALUES,
   SALE_STATUSES,
   PAYMENT_STATUSES,
   PAYMENT_TYPES,
