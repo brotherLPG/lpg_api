@@ -15,7 +15,7 @@ const optionalCode = code.optional();
 const receiptCreateBody = {
   receiptNumber: optionalCode,
   supplierId: objectId,
-  storageTankId: objectId,
+  storageTankId: objectId.optional(),
   receivedQuantityKg: positiveKg,
   purchaseRatePerKg: nonNegative.optional(),
   truckRegistrationNumber: z.string().trim().max(40).optional(),
@@ -38,7 +38,7 @@ const receiptUpdateBody = {
 
 const fillingCreateBody = {
   batchNumber: optionalCode,
-  storageTankId: objectId,
+  storageTankId: objectId.optional(),
   cylinderTypeId: objectId,
   cylinderCount: z.coerce.number().int().min(1),
   targetFillWeightKg: positiveKg.optional(),

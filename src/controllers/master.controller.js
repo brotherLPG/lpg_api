@@ -34,6 +34,14 @@ function createMasterController(service, { singular, plural }) {
     });
   }
 
+  if (service.getDashboard) {
+    controller.getDashboard = asyncHandler(async (req, res) => {
+      const query = req.validated?.query || req.query;
+      const data = await service.getDashboard(query);
+      send(res, 200, `${singular} dashboard fetched`, data);
+    });
+  }
+
   return controller;
 }
 

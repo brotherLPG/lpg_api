@@ -12,6 +12,9 @@ function createMasterRouter({ moduleName, controller, schemas, allowDelete = tru
   if (controller.getFormOptions) {
     router.get('/form-options', authorize(`${moduleName}.read`), controller.getFormOptions);
   }
+  if (controller.getDashboard) {
+    router.get('/dashboard', authorize(`${moduleName}.read`), controller.getDashboard);
+  }
   router.get('/:id', authorize(`${moduleName}.read`), validate(schemas.idParam), controller.get);
   if (allowUpdate !== false) {
     router.patch('/:id', authorize(`${moduleName}.update`), validate(schemas.update), controller.update);

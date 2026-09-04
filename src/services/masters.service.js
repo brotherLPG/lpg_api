@@ -222,6 +222,10 @@ const storageTank = createMasterService({
     tankStatuses: TANK_STATUSES,
   }),
   prepareCreate: async (body) => {
+    const existingCount = await StorageTank.countDocuments();
+    if (existingCount > 0) {
+      throw new ApiError(400, 'Plant already has a storage tank');
+    }
     assertTankLevels(body);
     return body;
   },
@@ -242,6 +246,119 @@ const storageTank = createMasterService({
     }
   },
 });
+
+function titleCase(value) {
+  return String(value || '')
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function formatKg(value) {
+  const amount = Number(value) || 0;
+  if (Number.isInteger(amount)) return String(amount);
+  return String(Math.round(amount * 10) / 10);
+}
+
+function cylinderDescription(type) {
+  if (!type) return '';
+  const category = CYLINDER_CATEGORIES.find((item) => item.value === type.cylinderCategory);
+  const categoryLabel = category?.label || titleCase(type.cylinderCategory);
+  if (type.capacityKg && categoryLabel) {
+    return `${formatKg(type.capacityKg)} KG ${categoryLabel}`;
+  }
+  return type.typeName || '';
+}
+
+function tankLevel(tank) {
+  const capacityKg = tank.capacityKg || 0;
+  const currentQuantityKg = tank.currentQuantityKg || 0;
+  const minimumSafeQuantityKg = tank.minimumSafeQuantityKg || 0;
+  const maximumSafeQuantityKg = tank.maximumSafeQuantityKg || 0;
+  const fillPercent = capacityKg > 0
+    ? Math.round((currentQuantityKg / capacityKg) * 1000) / 10
+    : 0;
+
+  let stockStatus = 'ok';
+  let stockAlert = null;
+
+  if (minimumSafeQuantityKg > 0 && currentQuantityKg <= minimumSafeQuantityKg) {
+    stockStatus = 'below-minimum';
+    stockAlert = `Tank is at or below the minimum safe threshold of ${minimumSafeQuantityKg.toLocaleString('en-US')} KG.`;
+  } else if (minimumSafeQuantityKg > 0 && currentQuantityKg <= minimumSafeQuantityKg * 2.5) {
+    stockStatus = 'approaching';
+    stockAlert = `Tank approaching minimum safe threshold level of ${minimumSafeQuantityKg.toLocaleString('en-US')} KG.`;
+  } else if (maximumSafeQuantityKg > 0 && currentQuantityKg >= maximumSafeQuantityKg) {
+    stockStatus = 'above-maximum';
+    stockAlert = `Tank is at or above the maximum safe capacity of ${maximumSafeQuantityKg.toLocaleString('en-US')} KG.`;
+  }
+
+  return {
+    fillPercent,
+    stockStatus,
+    stockAlert,
+  };
+}
+
+async function getTankDashboard(query = {}) {
+  const recentLimit = Math.min(20, Math.max(1, parseInt(query.recentLimit, 10) || 5));
+  const tank = await StorageTank.findOne().sort({ createdAt: 1 }).lean();
+  if (!tank) {
+    throw new ApiError(404, 'No storage tank is configured');
+  }
+
+  const [receipts, batches] = await Promise.all([
+    LPGReceipt.find({ storageTankId: tank._id })
+      .populate('supplierId', 'supplierCode supplierName')
+      .sort({ receivedAt: -1, createdAt: -1 })
+      .limit(recentLimit)
+      .lean(),
+    FillingBatch.find({ storageTankId: tank._id })
+      .populate('cylinderTypeId', 'typeCode typeName capacityKg cylinderCategory')
+      .sort({ fillingDate: -1, createdAt: -1 })
+      .limit(recentLimit)
+      .lean(),
+  ]);
+
+  const level = tankLevel(tank);
+
+  return {
+    _id: tank._id,
+    tankCode: tank.tankCode,
+    tankName: tank.tankName,
+    tankStatus: tank.tankStatus,
+    tankStatusLabel: titleCase(tank.tankStatus),
+    locationDescription: tank.locationDescription || '',
+    installationDate: tank.installationDate,
+    capacityKg: tank.capacityKg,
+    currentQuantityKg: tank.currentQuantityKg,
+    minimumSafeQuantityKg: tank.minimumSafeQuantityKg,
+    maximumSafeQuantityKg: tank.maximumSafeQuantityKg,
+    fillPercent: level.fillPercent,
+    stockStatus: level.stockStatus,
+    stockAlert: level.stockAlert,
+    recentReceipts: receipts.map((receipt) => ({
+      _id: receipt._id,
+      receiptNumber: receipt.receiptNumber,
+      receivedAt: receipt.receivedAt,
+      receivedQuantityKg: receipt.receivedQuantityKg,
+      supplierId: receipt.supplierId?._id || receipt.supplierId,
+      supplierName: receipt.supplierId?.supplierName || '',
+    })),
+    recentFillingBatches: batches.map((batch) => ({
+      _id: batch._id,
+      batchNumber: batch.batchNumber,
+      fillingDate: batch.fillingDate,
+      cylinderCount: batch.cylinderCount,
+      cylinderTypeId: batch.cylinderTypeId?._id || batch.cylinderTypeId,
+      typeName: batch.cylinderTypeId?.typeName || '',
+      cylinderDescription: cylinderDescription(batch.cylinderTypeId),
+    })),
+  };
+}
+
+storageTank.getDashboard = getTankDashboard;
 
 const inventoryItem = createMasterService({
   Model: InventoryItem,

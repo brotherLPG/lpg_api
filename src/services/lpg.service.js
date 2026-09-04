@@ -80,6 +80,19 @@ async function assertSupplier(supplierId, session) {
   return supplier;
 }
 
+async function resolveTankId(storageTankId, session) {
+  if (storageTankId) {
+    await assertTank(storageTankId, session);
+    return storageTankId;
+  }
+  const tank = await StorageTank.findOne().sort({ createdAt: 1 }).session(session);
+  if (!tank) {
+    throw new ApiError(400, 'No storage tank is configured');
+  }
+  await assertTank(tank._id, session);
+  return tank._id;
+}
+
 async function assertTank(tankId, session, { mustBeOperational = true } = {}) {
   const tank = await StorageTank.findById(tankId).session(session);
   if (!tank) {
@@ -246,7 +259,7 @@ async function listFillings(query) {
 async function createReceipt(body, req) {
   const result = await withTransaction(async (session) => {
     await assertSupplier(body.supplierId, session);
-    await assertTank(body.storageTankId, session);
+    const storageTankId = await resolveTankId(body.storageTankId, session);
 
     const receiptNumber = await assignNumber(LPGReceipt, 'receiptNumber', 'RCP', body.receiptNumber, session);
     const receivedQuantityKg = body.receivedQuantityKg;
@@ -254,7 +267,7 @@ async function createReceipt(body, req) {
     const payload = {
       receiptNumber,
       supplierId: body.supplierId,
-      storageTankId: body.storageTankId,
+      storageTankId,
       receivedQuantityKg,
       purchaseRatePerKg,
       totalPurchaseAmount: computePurchaseAmount(receivedQuantityKg, purchaseRatePerKg),
@@ -266,7 +279,7 @@ async function createReceipt(body, req) {
     };
 
     const [doc] = await LPGReceipt.create([payload], { session });
-    const tank = await incrementTank(body.storageTankId, receivedQuantityKg, session);
+    const tank = await incrementTank(storageTankId, receivedQuantityKg, session);
 
     await writeAudit({
       req,
@@ -398,8 +411,9 @@ async function createFilling(body, req) {
     await assertEmployee(body.operatorEmployeeId, session);
     const cylinderType = await assertCylinderType(body.cylinderTypeId, session);
     const qty = resolveFillingQty(body, cylinderType);
+    const storageTankId = await resolveTankId(body.storageTankId, session);
     const stock = await applyFillingStock({
-      storageTankId: body.storageTankId,
+      storageTankId,
       cylinderTypeId: body.cylinderTypeId,
       cylinderCount: qty.cylinderCount,
       actualLpgUsedKg: qty.actualLpgUsedKg,
@@ -408,7 +422,7 @@ async function createFilling(body, req) {
     const batchNumber = await assignNumber(FillingBatch, 'batchNumber', 'FLL', body.batchNumber, session);
     const payload = {
       batchNumber,
-      storageTankId: body.storageTankId,
+      storageTankId,
       cylinderTypeId: body.cylinderTypeId,
       cylinderCount: qty.cylinderCount,
       targetFillWeightKg: qty.targetFillWeightKg,
