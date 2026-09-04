@@ -24,7 +24,9 @@ const { nextSequentialCode } = require('../utils/nextCode');
 const { createMasterService } = require('./master.factory');
 const {
   TANK_STATUSES,
-  ACCOUNT_TYPES,
+  ACCOUNT_TYPE_OPTIONS,
+  ACCOUNT_CATEGORIES,
+  ACCOUNT_RECORD_STATUSES,
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORY_OPTIONS,
   UNIT_OF_MEASURE_OPTIONS,
@@ -694,6 +696,161 @@ const employee = createMasterService({
   },
 });
 
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+function accountStatusOf(account) {
+  if (account.isActive === false) {
+    return { status: 'inactive', statusLabel: 'Inactive' };
+  }
+  if (account.needsReview) {
+    return { status: 'review', statusLabel: 'Review' };
+  }
+  return { status: 'active', statusLabel: 'Active' };
+}
+
+function accountStatusFilter(status) {
+  if (status === 'inactive') {
+    return { isActive: false };
+  }
+  if (status === 'review') {
+    return { needsReview: true };
+  }
+  if (status === 'active') {
+    return { isActive: true, needsReview: { $ne: true } };
+  }
+  return {};
+}
+
+function branchDisplayOf(account) {
+  const bankName = account.bankName || '';
+  const branchName = account.branchName || '';
+  if (bankName && branchName) return `${bankName} – ${branchName}`;
+  return bankName || branchName || '';
+}
+
+function mapAccount(account) {
+  const parent = account.parentAccountId && typeof account.parentAccountId === 'object'
+    ? account.parentAccountId
+    : null;
+  const status = accountStatusOf(account);
+
+  return {
+    _id: account._id,
+    accountCode: account.accountCode,
+    accountName: account.accountName,
+    accountType: account.accountType,
+    accountTypeLabel: ACCOUNT_TYPE_OPTIONS.find((item) => item.value === account.accountType)?.label
+      || titleCase(account.accountType),
+    accountCategory: account.accountCategory || 'operating',
+    accountCategoryLabel: ACCOUNT_CATEGORIES.find((item) => item.value === account.accountCategory)?.label
+      || titleCase(account.accountCategory),
+    parentAccountId: parent?._id || account.parentAccountId || null,
+    parentAccountName: parent?.accountName || '',
+    parentAccountCode: parent?.accountCode || '',
+    description: account.description || '',
+    bankName: account.bankName || '',
+    branchName: account.branchName || '',
+    branchDisplay: branchDisplayOf(account),
+    accountNumber: account.accountNumber || '',
+    ibanOrSwift: account.ibanOrSwift || '',
+    openingBalanceAmount: roundMoney(account.openingBalanceAmount),
+    currentBalanceAmount: roundMoney(account.currentBalanceAmount),
+    openedAt: account.openedAt || null,
+    allowManualEntries: account.allowManualEntries !== false,
+    isPrimary: Boolean(account.isPrimary),
+    needsReview: Boolean(account.needsReview),
+    isActive: account.isActive !== false,
+    ...status,
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+  };
+}
+
+async function clearOtherPrimaryAccounts(excludeId) {
+  const filter = { isPrimary: true };
+  if (excludeId) filter._id = { $ne: excludeId };
+  await Account.updateMany(filter, { $set: { isPrimary: false } });
+}
+
+async function accountListSummary() {
+  const [totals] = await Account.aggregate([
+    {
+      $group: {
+        _id: null,
+        totalAccounts: { $sum: 1 },
+        activeAccounts: { $sum: { $cond: ['$isActive', 1, 0] } },
+        totalOpeningBalance: { $sum: '$openingBalanceAmount' },
+        totalCurrentBalance: { $sum: '$currentBalanceAmount' },
+        needsReviewCount: { $sum: { $cond: ['$needsReview', 1, 0] } },
+      },
+    },
+  ]);
+
+  return {
+    totalAccounts: totals?.totalAccounts || 0,
+    activeAccounts: totals?.activeAccounts || 0,
+    totalOpeningBalance: roundMoney(totals?.totalOpeningBalance),
+    totalCurrentBalance: roundMoney(totals?.totalCurrentBalance),
+    needsReviewCount: totals?.needsReviewCount || 0,
+  };
+}
+
+async function accountFormOptions(query = {}) {
+  const excludeId = query.id;
+  const parentFilter = { isActive: true };
+  if (excludeId) parentFilter._id = { $ne: excludeId };
+
+  const [nextAccountCode, parentAccounts] = await Promise.all([
+    nextSequentialCode(Account, 'accountCode', 'ACC'),
+    Account.find(parentFilter).select('accountCode accountName accountType').sort({ accountCode: 1 }).lean(),
+  ]);
+
+  return {
+    nextAccountCode,
+    accountTypes: ACCOUNT_TYPE_OPTIONS,
+    accountCategories: ACCOUNT_CATEGORIES,
+    statuses: ACCOUNT_RECORD_STATUSES,
+    activeStatuses: ACTIVE_STATUSES,
+    parentAccounts: parentAccounts.map((account) => ({
+      _id: account._id,
+      accountCode: account.accountCode,
+      accountName: account.accountName,
+      accountType: account.accountType,
+      label: `${account.accountCode} – ${account.accountName}`,
+    })),
+  };
+}
+
+async function prepareAccountCreate(body) {
+  delete body.currentBalanceAmount;
+  await assertParentAccount(body.parentAccountId);
+  if (body.isPrimary) {
+    await clearOtherPrimaryAccounts();
+  }
+  const openingBalanceAmount = body.openingBalanceAmount ?? 0;
+  return {
+    ...body,
+    openingBalanceAmount,
+    currentBalanceAmount: openingBalanceAmount,
+    allowManualEntries: body.allowManualEntries !== false,
+    isPrimary: Boolean(body.isPrimary),
+    needsReview: Boolean(body.needsReview),
+  };
+}
+
+async function prepareAccountUpdate(body, doc) {
+  delete body.currentBalanceAmount;
+  if (body.parentAccountId !== undefined) {
+    await assertParentAccount(body.parentAccountId, doc._id);
+  }
+  if (body.isPrimary === true) {
+    await clearOtherPrimaryAccounts(doc._id);
+  }
+  return body;
+}
+
 const account = createMasterService({
   Model: Account,
   entityName: 'Account',
@@ -702,32 +859,26 @@ const account = createMasterService({
   codePrefix: 'ACC',
   cachePrefix: 'accounts:',
   populate: [{ path: 'parentAccountId', select: 'accountCode accountName accountType' }],
-  searchFields: ['accountCode', 'accountName'],
+  searchFields: ['accountCode', 'accountName', 'bankName', 'branchName', 'accountNumber'],
   sort: { accountCode: 1 },
   allowDelete: false,
   extraFilters: (query) => {
     const filter = {};
     if (query.accountType) filter.accountType = query.accountType;
+    if (query.accountCategory) filter.accountCategory = query.accountCategory;
+    Object.assign(filter, accountStatusFilter(query.status));
     return filter;
   },
+  mapItem: mapAccount,
   listMeta: async () => ({
-    accountTypes: ACCOUNT_TYPES,
+    accountTypes: ACCOUNT_TYPE_OPTIONS,
+    accountCategories: ACCOUNT_CATEGORIES,
+    statuses: ACCOUNT_RECORD_STATUSES,
   }),
-  prepareCreate: async (body) => {
-    await assertParentAccount(body.parentAccountId);
-    const openingBalanceAmount = body.openingBalanceAmount || 0;
-    return {
-      ...body,
-      openingBalanceAmount,
-      currentBalanceAmount: openingBalanceAmount,
-    };
-  },
-  prepareUpdate: async (body, doc) => {
-    if (body.parentAccountId !== undefined) {
-      await assertParentAccount(body.parentAccountId, doc._id);
-    }
-    return body;
-  },
+  listSummary: accountListSummary,
+  formOptions: accountFormOptions,
+  prepareCreate: prepareAccountCreate,
+  prepareUpdate: prepareAccountUpdate,
 });
 
 const expenseCategory = createMasterService({

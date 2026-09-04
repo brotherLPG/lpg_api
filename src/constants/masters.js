@@ -1,5 +1,30 @@
 const TANK_STATUSES = ['operational', 'maintenance', 'decommissioned'];
 const ACCOUNT_TYPES = ['cash', 'bank', 'receivable', 'payable', 'income', 'expense', 'equity'];
+const ACCOUNT_TYPE_OPTIONS = [
+  { value: 'cash', label: 'Cash' },
+  { value: 'bank', label: 'Bank' },
+  { value: 'receivable', label: 'Receivable' },
+  { value: 'payable', label: 'Payable' },
+  { value: 'income', label: 'Income' },
+  { value: 'expense', label: 'Expense' },
+  { value: 'equity', label: 'Equity' },
+];
+const ACCOUNT_CATEGORIES = [
+  { value: 'operating', label: 'Operating' },
+  { value: 'banking', label: 'Banking' },
+  { value: 'fleet', label: 'Fleet / Vehicle' },
+  { value: 'payroll', label: 'Payroll' },
+  { value: 'payable', label: 'Payables' },
+  { value: 'receivable', label: 'Receivables' },
+  { value: 'other', label: 'Other' },
+];
+const ACCOUNT_CATEGORY_VALUES = ACCOUNT_CATEGORIES.map((item) => item.value);
+const ACCOUNT_RECORD_STATUSES = [
+  { value: 'active', label: 'Active' },
+  { value: 'review', label: 'Review' },
+  { value: 'inactive', label: 'Inactive' },
+];
+const ACCOUNT_RECORD_STATUS_VALUES = ACCOUNT_RECORD_STATUSES.map((item) => item.value);
 const EMPLOYMENT_STATUSES = ['active', 'inactive', 'terminated'];
 const ITEM_CATEGORIES = ['filled-cylinder', 'empty-cylinder', 'lpg', 'spare', 'other'];
 const ITEM_CATEGORY_OPTIONS = [
@@ -89,6 +114,11 @@ const BATCH_STATUS_VALUES = BATCH_STATUSES.map((item) => item.value);
 module.exports = {
   TANK_STATUSES,
   ACCOUNT_TYPES,
+  ACCOUNT_TYPE_OPTIONS,
+  ACCOUNT_CATEGORIES,
+  ACCOUNT_CATEGORY_VALUES,
+  ACCOUNT_RECORD_STATUSES,
+  ACCOUNT_RECORD_STATUS_VALUES,
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORIES,
   ITEM_CATEGORY_OPTIONS,

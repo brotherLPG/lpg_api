@@ -13,6 +13,8 @@ const {
 const {
   TANK_STATUSES,
   ACCOUNT_TYPES,
+  ACCOUNT_CATEGORY_VALUES,
+  ACCOUNT_RECORD_STATUS_VALUES,
   EMPLOYMENT_STATUSES,
   ITEM_CATEGORIES,
   UNITS_OF_MEASURE,
@@ -178,8 +180,18 @@ const accountCreateBody = {
   accountCode: code.optional(),
   accountName: z.string().trim().min(2).max(160),
   accountType: z.enum(ACCOUNT_TYPES),
-  parentAccountId: objectId.nullish(),
+  accountCategory: z.enum(ACCOUNT_CATEGORY_VALUES).optional(),
+  parentAccountId: optionalLinkedId,
+  description: z.string().trim().max(1000).optional(),
+  bankName: z.string().trim().max(160).optional(),
+  branchName: z.string().trim().max(160).optional(),
+  accountNumber: z.string().trim().max(40).optional(),
+  ibanOrSwift: z.string().trim().max(50).optional(),
   openingBalanceAmount: z.coerce.number().optional(),
+  openedAt: optionalDate,
+  allowManualEntries: z.boolean().optional(),
+  isPrimary: z.boolean().optional(),
+  needsReview: z.boolean().optional(),
   isActive: z.boolean().optional(),
 };
 
@@ -187,7 +199,18 @@ const accountUpdateBody = {
   accountCode: code.optional(),
   accountName: z.string().trim().min(2).max(160).optional(),
   accountType: z.enum(ACCOUNT_TYPES).optional(),
-  parentAccountId: objectId.nullish(),
+  accountCategory: z.enum(ACCOUNT_CATEGORY_VALUES).optional(),
+  parentAccountId: optionalLinkedId.optional(),
+  description: z.string().trim().max(1000).optional(),
+  bankName: z.string().trim().max(160).optional(),
+  branchName: z.string().trim().max(160).optional(),
+  accountNumber: z.string().trim().max(40).optional(),
+  ibanOrSwift: z.string().trim().max(50).optional(),
+  openingBalanceAmount: z.coerce.number().optional(),
+  openedAt: optionalDate,
+  allowManualEntries: z.boolean().optional(),
+  isPrimary: z.boolean().optional(),
+  needsReview: z.boolean().optional(),
   isActive: z.boolean().optional(),
 };
 
@@ -269,7 +292,11 @@ const account = {
     params: z.object({ id: objectId }),
     body: atLeastOneField(z.object(accountUpdateBody)),
   }),
-  list: listMasterQuery({ accountType: z.enum(ACCOUNT_TYPES).optional() }),
+  list: listMasterQuery({
+    accountType: z.enum(ACCOUNT_TYPES).optional(),
+    accountCategory: z.enum(ACCOUNT_CATEGORY_VALUES).optional(),
+    status: z.enum(ACCOUNT_RECORD_STATUS_VALUES).optional(),
+  }),
   idParam: idParamSchema,
 };
 
