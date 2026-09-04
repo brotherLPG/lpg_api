@@ -37,11 +37,17 @@ const lpgReceiptSchema = new mongoose.Schema(
       required: [true, 'receivedByUserId is required'],
     },
     remarks: { type: String, trim: true, default: '' },
+    receiptStatus: {
+      type: String,
+      enum: ['pending', 'confirmed'],
+      default: 'confirmed',
+    },
   },
   { timestamps: true }
 );
 
 lpgReceiptSchema.index({ supplierId: 1, receivedAt: -1 });
 lpgReceiptSchema.index({ storageTankId: 1, receivedAt: -1 });
+lpgReceiptSchema.index({ receiptStatus: 1, receivedAt: -1 });
 
 module.exports = mongoose.model('LPGReceipt', lpgReceiptSchema);

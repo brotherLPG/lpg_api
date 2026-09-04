@@ -8,6 +8,7 @@ const {
   listMasterQuery,
   atLeastOneField,
 } = require('./common.validation');
+const { RECEIPT_STATUS_VALUES } = require('../constants/masters');
 
 const optionalDate = z.coerce.date().optional();
 const optionalCode = code.optional();
@@ -22,6 +23,7 @@ const receiptCreateBody = {
   receivedAt: optionalDate,
   supplierInvoiceNumber: z.string().trim().max(80).optional(),
   remarks: z.string().trim().max(500).optional(),
+  receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
 };
 
 const receiptUpdateBody = {
@@ -34,6 +36,7 @@ const receiptUpdateBody = {
   receivedAt: optionalDate,
   supplierInvoiceNumber: z.string().trim().max(80).optional(),
   remarks: z.string().trim().max(500).optional(),
+  receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
 };
 
 const fillingCreateBody = {
@@ -63,6 +66,8 @@ const fillingUpdateBody = {
 const receiptList = listMasterQuery({
   supplierId: objectId.optional(),
   storageTankId: objectId.optional(),
+  receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
+  date: z.coerce.date().optional(),
   startDate: z.coerce.date().optional(),
   endDate: z.coerce.date().optional(),
 });

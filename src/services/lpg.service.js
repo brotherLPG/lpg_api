@@ -13,6 +13,7 @@ const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
+const { RECEIPT_STATUSES } = require('../constants/masters');
 
 const RECEIPT_POPULATE = [
   { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber city isActive' },
@@ -36,11 +37,62 @@ function computePurchaseAmount(quantityKg, rate) {
 }
 
 function applyDateRange(filter, field, query) {
+  if (query.date) {
+    const start = new Date(query.date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    filter[field] = { $gte: start, $lt: end };
+    return filter;
+  }
   if (!query.startDate && !query.endDate) return filter;
   filter[field] = {};
   if (query.startDate) filter[field].$gte = new Date(query.startDate);
   if (query.endDate) filter[field].$lte = new Date(query.endDate);
   return filter;
+}
+
+function receiptStatusOf(doc) {
+  return doc.receiptStatus || 'confirmed';
+}
+
+function receiptStatusLabel(status) {
+  return RECEIPT_STATUSES.find((item) => item.value === status)?.label || 'Confirmed';
+}
+
+function toReceiptItem(doc) {
+  const receiptStatus = receiptStatusOf(doc);
+  return {
+    _id: doc._id,
+    receiptNumber: doc.receiptNumber,
+    supplierId: doc.supplierId?._id || doc.supplierId,
+    supplierName: doc.supplierId?.supplierName || '',
+    supplier: doc.supplierId && doc.supplierId.supplierName
+      ? {
+          _id: doc.supplierId._id,
+          supplierCode: doc.supplierId.supplierCode,
+          supplierName: doc.supplierId.supplierName,
+        }
+      : doc.supplierId,
+    receivedAt: doc.receivedAt,
+    truckRegistrationNumber: doc.truckRegistrationNumber || '',
+    receivedQuantityKg: doc.receivedQuantityKg,
+    purchaseRatePerKg: doc.purchaseRatePerKg || 0,
+    totalPurchaseAmount: doc.totalPurchaseAmount || 0,
+    receiptStatus,
+    receiptStatusLabel: receiptStatusLabel(receiptStatus),
+    supplierInvoiceNumber: doc.supplierInvoiceNumber || '',
+    remarks: doc.remarks || '',
+    receivedByUserId: doc.receivedByUserId,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+function currentMonthRange(now = new Date()) {
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  return { start, end };
 }
 
 function invalidateOps() {
@@ -197,7 +249,7 @@ async function getReceiptById(id) {
   if (!doc) {
     throw new ApiError(404, 'LPGReceipt not found');
   }
-  return doc;
+  return toReceiptItem(doc);
 }
 
 async function getFillingById(id) {
@@ -213,23 +265,68 @@ async function listReceipts(query) {
   const filter = applyDateRange({}, 'receivedAt', query);
   if (query.supplierId) filter.supplierId = query.supplierId;
   if (query.storageTankId) filter.storageTankId = query.storageTankId;
+  if (query.receiptStatus === 'pending') {
+    filter.receiptStatus = 'pending';
+  } else if (query.receiptStatus === 'confirmed') {
+    filter.receiptStatus = { $ne: 'pending' };
+  }
+
   if (query.search) {
+    const search = query.search.trim();
+    const matchingSuppliers = await Supplier.find({
+      supplierName: { $regex: search, $options: 'i' },
+    }).select('_id');
     filter.$or = [
-      { receiptNumber: { $regex: query.search, $options: 'i' } },
-      { supplierInvoiceNumber: { $regex: query.search, $options: 'i' } },
-      { truckRegistrationNumber: { $regex: query.search, $options: 'i' } },
+      { receiptNumber: { $regex: search, $options: 'i' } },
+      { supplierInvoiceNumber: { $regex: search, $options: 'i' } },
+      { truckRegistrationNumber: { $regex: search, $options: 'i' } },
+      { supplierId: { $in: matchingSuppliers.map((supplier) => supplier._id) } },
     ];
   }
 
+  const { start: monthStart, end: monthEnd } = currentMonthRange();
   const findQuery = populateQuery(
     LPGReceipt.find(filter).sort({ receivedAt: -1, createdAt: -1 }).skip(skip).limit(limit),
     RECEIPT_POPULATE
   );
-  const [items, total] = await Promise.all([
+
+  const [items, total, monthAgg, pendingReceipts, suppliers] = await Promise.all([
     findQuery.lean(),
     LPGReceipt.countDocuments(filter),
+    LPGReceipt.aggregate([
+      { $match: { receivedAt: { $gte: monthStart, $lt: monthEnd } } },
+      {
+        $group: {
+          _id: null,
+          shipmentCount: { $sum: 1 },
+          quantityKg: { $sum: '$receivedQuantityKg' },
+          purchaseCost: { $sum: '$totalPurchaseAmount' },
+        },
+      },
+    ]),
+    LPGReceipt.countDocuments({ receiptStatus: 'pending' }),
+    Supplier.find({ isActive: true }).select('supplierCode supplierName').sort({ supplierName: 1 }).lean(),
   ]);
-  return paginated(items, total, page, limit);
+
+  const month = monthAgg[0] || { shipmentCount: 0, quantityKg: 0, purchaseCost: 0 };
+
+  return {
+    ...paginated(items.map(toReceiptItem), total, page, limit),
+    summary: {
+      thisMonthReceipts: month.shipmentCount || 0,
+      thisMonthQuantityKg: roundMoney(month.quantityKg || 0),
+      thisMonthPurchaseCost: roundMoney(month.purchaseCost || 0),
+      pendingReceipts,
+    },
+    meta: {
+      statuses: RECEIPT_STATUSES,
+      suppliers: suppliers.map((supplier) => ({
+        _id: supplier._id,
+        supplierCode: supplier.supplierCode,
+        supplierName: supplier.supplierName,
+      })),
+    },
+  };
 }
 
 async function listFillings(query) {
@@ -264,6 +361,7 @@ async function createReceipt(body, req) {
     const receiptNumber = await assignNumber(LPGReceipt, 'receiptNumber', 'RCP', body.receiptNumber, session);
     const receivedQuantityKg = body.receivedQuantityKg;
     const purchaseRatePerKg = body.purchaseRatePerKg || 0;
+    const receiptStatus = body.receiptStatus || 'confirmed';
     const payload = {
       receiptNumber,
       supplierId: body.supplierId,
@@ -276,10 +374,15 @@ async function createReceipt(body, req) {
       supplierInvoiceNumber: body.supplierInvoiceNumber || '',
       receivedByUserId: req.user._id,
       remarks: body.remarks || '',
+      receiptStatus,
     };
 
     const [doc] = await LPGReceipt.create([payload], { session });
-    const tank = await incrementTank(storageTankId, receivedQuantityKg, session);
+    let tankQuantityAfterKg = null;
+    if (receiptStatus === 'confirmed') {
+      const tank = await incrementTank(storageTankId, receivedQuantityKg, session);
+      tankQuantityAfterKg = tank.currentQuantityKg;
+    }
 
     await writeAudit({
       req,
@@ -290,16 +393,16 @@ async function createReceipt(body, req) {
       entityId: doc._id,
       newValues: {
         ...payload,
-        tankQuantityAfterKg: tank.currentQuantityKg,
+        tankQuantityAfterKg,
       },
     });
 
-    return { id: doc._id, tankQuantityAfterKg: tank.currentQuantityKg };
+    return { id: doc._id, tankQuantityAfterKg };
   });
 
   invalidateOps();
   const receipt = await getReceiptById(result.id);
-  return { ...receipt.toObject(), tankQuantityAfterKg: result.tankQuantityAfterKg };
+  return { ...receipt, tankQuantityAfterKg: result.tankQuantityAfterKg };
 }
 
 async function updateReceipt(id, body, req) {
@@ -320,6 +423,8 @@ async function updateReceipt(id, body, req) {
     const nextTankId = body.storageTankId || existing.storageTankId;
     const nextQty = body.receivedQuantityKg ?? existing.receivedQuantityKg;
     const nextRate = body.purchaseRatePerKg ?? existing.purchaseRatePerKg;
+    const previousStatus = receiptStatusOf(existing);
+    const nextStatus = body.receiptStatus || previousStatus;
 
     if (String(nextSupplierId) !== String(existing.supplierId)) {
       await assertSupplier(nextSupplierId, session);
@@ -327,11 +432,18 @@ async function updateReceipt(id, body, req) {
 
     const qtyChanged = nextQty !== existing.receivedQuantityKg;
     const tankChanged = String(nextTankId) !== String(existing.storageTankId);
+    const wasConfirmed = previousStatus === 'confirmed';
+    const willConfirm = nextStatus === 'confirmed';
 
-    if (qtyChanged || tankChanged) {
+    if (wasConfirmed && willConfirm && (qtyChanged || tankChanged)) {
       await decrementTank(existing.storageTankId, existing.receivedQuantityKg, session);
       await assertTank(nextTankId, session);
       await incrementTank(nextTankId, nextQty, session);
+    } else if (!wasConfirmed && willConfirm) {
+      await assertTank(nextTankId, session);
+      await incrementTank(nextTankId, nextQty, session);
+    } else if (wasConfirmed && !willConfirm) {
+      await decrementTank(existing.storageTankId, existing.receivedQuantityKg, session);
     }
 
     const oldValues = {
@@ -346,6 +458,7 @@ async function updateReceipt(id, body, req) {
     existing.receivedQuantityKg = nextQty;
     existing.purchaseRatePerKg = nextRate;
     existing.totalPurchaseAmount = computePurchaseAmount(nextQty, nextRate);
+    existing.receiptStatus = nextStatus;
     if (body.truckRegistrationNumber !== undefined) existing.truckRegistrationNumber = body.truckRegistrationNumber;
     if (body.receivedAt !== undefined) existing.receivedAt = body.receivedAt;
     if (body.supplierInvoiceNumber !== undefined) existing.supplierInvoiceNumber = body.supplierInvoiceNumber;

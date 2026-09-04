@@ -57,6 +57,11 @@ const CYLINDER_MATERIALS = [
   { value: 'composite', label: 'Composite' },
 ];
 const CYLINDER_MATERIAL_VALUES = CYLINDER_MATERIALS.map((item) => item.value);
+const RECEIPT_STATUSES = [
+  { value: 'confirmed', label: 'Confirmed' },
+  { value: 'pending', label: 'Pending' },
+];
+const RECEIPT_STATUS_VALUES = RECEIPT_STATUSES.map((item) => item.value);
 
 module.exports = {
   TANK_STATUSES,
@@ -84,4 +89,6 @@ module.exports = {
   CYLINDER_VALVE_VALUES,
   CYLINDER_MATERIALS,
   CYLINDER_MATERIAL_VALUES,
+  RECEIPT_STATUSES,
+  RECEIPT_STATUS_VALUES,
 };
