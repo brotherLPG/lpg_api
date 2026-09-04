@@ -62,6 +62,11 @@ const RECEIPT_STATUSES = [
   { value: 'pending', label: 'Pending' },
 ];
 const RECEIPT_STATUS_VALUES = RECEIPT_STATUSES.map((item) => item.value);
+const BATCH_STATUSES = [
+  { value: 'pending', label: 'Pending' },
+  { value: 'completed', label: 'Completed' },
+];
+const BATCH_STATUS_VALUES = BATCH_STATUSES.map((item) => item.value);
 
 module.exports = {
   TANK_STATUSES,
@@ -91,4 +96,6 @@ module.exports = {
   CYLINDER_MATERIAL_VALUES,
   RECEIPT_STATUSES,
   RECEIPT_STATUS_VALUES,
+  BATCH_STATUSES,
+  BATCH_STATUS_VALUES,
 };

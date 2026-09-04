@@ -13,7 +13,7 @@ const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
-const { RECEIPT_STATUSES } = require('../constants/masters');
+const { RECEIPT_STATUSES, BATCH_STATUSES } = require('../constants/masters');
 
 const RECEIPT_POPULATE = [
   { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber city isActive' },
@@ -120,6 +120,80 @@ function toReceiptItem(doc) {
           capacityKg: tank.capacityKg,
         }
       : null,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+function resolveBatchStatus(body, fallback = 'pending') {
+  if (body.batchStatus) return body.batchStatus;
+  return fallback;
+}
+
+function batchStatusOf(doc) {
+  return doc.batchStatus || 'completed';
+}
+
+function batchStatusLabel(status) {
+  return BATCH_STATUSES.find((item) => item.value === status)?.label || 'Completed';
+}
+
+function tankDisplayName(tank) {
+  if (!tank) return '';
+  const current = tank.currentQuantityKg || 0;
+  const capacity = tank.capacityKg || 0;
+  return `${tank.tankCode} — ${tank.tankName} (${current.toLocaleString('en-US')} / ${capacity.toLocaleString('en-US')} KG)`;
+}
+
+function toFillingItem(doc) {
+  const batchStatus = batchStatusOf(doc);
+  const tank = doc.storageTankId && doc.storageTankId.tankCode ? doc.storageTankId : null;
+  const type = doc.cylinderTypeId && doc.cylinderTypeId.typeName ? doc.cylinderTypeId : null;
+  const operator = doc.operatorEmployeeId && doc.operatorEmployeeId.fullName ? doc.operatorEmployeeId : null;
+
+  return {
+    _id: doc._id,
+    batchNumber: doc.batchNumber,
+    fillingDate: doc.fillingDate,
+    cylinderCount: doc.cylinderCount,
+    targetFillWeightKg: doc.targetFillWeightKg,
+    actualLpgUsedKg: doc.actualLpgUsedKg,
+    remarks: doc.remarks || '',
+    batchStatus,
+    batchStatusLabel: batchStatusLabel(batchStatus),
+    storageTankId: tank?._id || doc.storageTankId || null,
+    sourceTankName: tank?.tankName || '',
+    tank: tank
+      ? {
+          _id: tank._id,
+          tankCode: tank.tankCode,
+          tankName: tank.tankName,
+          currentQuantityKg: tank.currentQuantityKg,
+          capacityKg: tank.capacityKg,
+          displayName: tankDisplayName(tank),
+        }
+      : null,
+    cylinderTypeId: type?._id || doc.cylinderTypeId || null,
+    cylinderTypeName: type?.typeName || '',
+    cylinderType: type
+      ? {
+          _id: type._id,
+          typeCode: type.typeCode,
+          typeName: type.typeName,
+          capacityKg: type.capacityKg,
+        }
+      : null,
+    operatorEmployeeId: operator?._id || doc.operatorEmployeeId || null,
+    operatorName: employeeLabel(operator),
+    operator: operator
+      ? {
+          _id: operator._id,
+          employeeCode: operator.employeeCode,
+          fullName: operator.fullName,
+          jobTitle: operator.jobTitle || '',
+        }
+      : null,
+    createdByUserId: doc.createdByUserId,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -321,6 +395,54 @@ async function getReceiptFormOptions() {
   };
 }
 
+async function getFillingFormOptions() {
+  const [cylinderTypes, employees, tank, nextBatchNumber] = await Promise.all([
+    CylinderType.find({ isActive: true })
+      .select('typeCode typeName capacityKg cylinderCategory tareWeightKg sellingPricePerCylinder')
+      .sort({ capacityKg: 1 })
+      .lean(),
+    Employee.find({ employmentStatus: { $ne: 'terminated' } })
+      .select('employeeCode fullName jobTitle employmentStatus')
+      .sort({ fullName: 1 })
+      .lean(),
+    StorageTank.findOne().sort({ createdAt: 1 }).lean(),
+    nextSequentialCode(FillingBatch, 'batchNumber', 'FLL'),
+  ]);
+
+  if (!tank) {
+    throw new ApiError(400, 'No storage tank is configured');
+  }
+
+  return {
+    nextBatchNumber,
+    statuses: BATCH_STATUSES,
+    tank: {
+      _id: tank._id,
+      tankCode: tank.tankCode,
+      tankName: tank.tankName,
+      currentQuantityKg: tank.currentQuantityKg,
+      capacityKg: tank.capacityKg,
+      availableCapacityKg: roundMoney((tank.capacityKg || 0) - (tank.currentQuantityKg || 0)),
+      tankStatus: tank.tankStatus,
+      displayName: tankDisplayName(tank),
+    },
+    cylinderTypes: cylinderTypes.map((type) => ({
+      _id: type._id,
+      typeCode: type.typeCode,
+      typeName: type.typeName,
+      capacityKg: type.capacityKg,
+      cylinderCategory: type.cylinderCategory || '',
+    })),
+    employees: employees.map((employee) => ({
+      _id: employee._id,
+      employeeCode: employee.employeeCode,
+      fullName: employee.fullName,
+      jobTitle: employee.jobTitle || '',
+      displayName: employeeLabel(employee),
+    })),
+  };
+}
+
 async function getReceiptById(id) {
   const [doc, form] = await Promise.all([
     populateQuery(LPGReceipt.findById(id), RECEIPT_POPULATE),
@@ -336,11 +458,17 @@ async function getReceiptById(id) {
 }
 
 async function getFillingById(id) {
-  const doc = await populateQuery(FillingBatch.findById(id), FILLING_POPULATE);
+  const [doc, form] = await Promise.all([
+    populateQuery(FillingBatch.findById(id), FILLING_POPULATE),
+    getFillingFormOptions(),
+  ]);
   if (!doc) {
     throw new ApiError(404, 'FillingBatch not found');
   }
-  return doc;
+  return {
+    ...toFillingItem(doc),
+    form,
+  };
 }
 
 async function listReceipts(query) {
@@ -418,10 +546,26 @@ async function listFillings(query) {
   if (query.storageTankId) filter.storageTankId = query.storageTankId;
   if (query.cylinderTypeId) filter.cylinderTypeId = query.cylinderTypeId;
   if (query.operatorEmployeeId) filter.operatorEmployeeId = query.operatorEmployeeId;
+  if (query.batchStatus === 'pending') {
+    filter.batchStatus = 'pending';
+  } else if (query.batchStatus === 'completed') {
+    filter.batchStatus = { $ne: 'pending' };
+  }
+
   if (query.search) {
+    const search = query.search.trim();
+    const regex = { $regex: search, $options: 'i' };
+    const [tanks, types, operators] = await Promise.all([
+      StorageTank.find({ $or: [{ tankName: regex }, { tankCode: regex }] }).select('_id'),
+      CylinderType.find({ $or: [{ typeName: regex }, { typeCode: regex }] }).select('_id'),
+      Employee.find({ fullName: regex }).select('_id'),
+    ]);
     filter.$or = [
-      { batchNumber: { $regex: query.search, $options: 'i' } },
-      { remarks: { $regex: query.search, $options: 'i' } },
+      { batchNumber: regex },
+      { remarks: regex },
+      { storageTankId: { $in: tanks.map((item) => item._id) } },
+      { cylinderTypeId: { $in: types.map((item) => item._id) } },
+      { operatorEmployeeId: { $in: operators.map((item) => item._id) } },
     ];
   }
 
@@ -429,11 +573,43 @@ async function listFillings(query) {
     FillingBatch.find(filter).sort({ fillingDate: -1, createdAt: -1 }).skip(skip).limit(limit),
     FILLING_POPULATE
   );
-  const [items, total] = await Promise.all([
+
+  const [items, total, summaryAgg, pending] = await Promise.all([
     findQuery.lean(),
     FillingBatch.countDocuments(filter),
+    FillingBatch.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalBatches: { $sum: 1 },
+          totalQuantityKg: {
+            $sum: {
+              $cond: [{ $ne: ['$batchStatus', 'pending'] }, '$actualLpgUsedKg', 0],
+            },
+          },
+          completed: {
+            $sum: { $cond: [{ $ne: ['$batchStatus', 'pending'] }, 1, 0] },
+          },
+        },
+      },
+    ]),
+    FillingBatch.countDocuments({ batchStatus: 'pending' }),
   ]);
-  return paginated(items, total, page, limit);
+
+  const stats = summaryAgg[0] || { totalBatches: 0, totalQuantityKg: 0, completed: 0 };
+
+  return {
+    ...paginated(items.map(toFillingItem), total, page, limit),
+    summary: {
+      totalBatches: stats.totalBatches || 0,
+      totalQuantityKg: roundMoney(stats.totalQuantityKg || 0),
+      completed: stats.completed || 0,
+      pending,
+    },
+    meta: {
+      statuses: BATCH_STATUSES,
+    },
+  };
 }
 
 async function createReceipt(body, req) {
@@ -632,12 +808,19 @@ async function createFilling(body, req) {
     const cylinderType = await assertCylinderType(body.cylinderTypeId, session);
     const qty = resolveFillingQty(body, cylinderType);
     const storageTankId = await resolveTankId(body.storageTankId, session);
-    const stock = await applyFillingStock({
-      storageTankId,
-      cylinderTypeId: body.cylinderTypeId,
-      cylinderCount: qty.cylinderCount,
-      actualLpgUsedKg: qty.actualLpgUsedKg,
-    }, session);
+    const tank = await StorageTank.findById(storageTankId).session(session);
+    const batchStatus = resolveBatchStatus(body, 'pending');
+    const quantityBeforeKg = tank?.currentQuantityKg || 0;
+
+    let stock = { tank, filled: null };
+    if (batchStatus === 'completed') {
+      stock = await applyFillingStock({
+        storageTankId,
+        cylinderTypeId: body.cylinderTypeId,
+        cylinderCount: qty.cylinderCount,
+        actualLpgUsedKg: qty.actualLpgUsedKg,
+      }, session);
+    }
 
     const batchNumber = await assignNumber(FillingBatch, 'batchNumber', 'FLL', body.batchNumber, session);
     const payload = {
@@ -647,13 +830,15 @@ async function createFilling(body, req) {
       cylinderCount: qty.cylinderCount,
       targetFillWeightKg: qty.targetFillWeightKg,
       actualLpgUsedKg: qty.actualLpgUsedKg,
-      fillingDate: body.fillingDate || new Date(),
+      fillingDate: body.fillingDate,
       operatorEmployeeId: body.operatorEmployeeId,
       createdByUserId: req.user._id,
       remarks: body.remarks || '',
+      batchStatus,
     };
 
     const [doc] = await FillingBatch.create([payload], { session });
+    const quantityAfterKg = stock.tank?.currentQuantityKg ?? quantityBeforeKg;
     await writeAudit({
       req,
       session,
@@ -663,24 +848,29 @@ async function createFilling(body, req) {
       entityId: doc._id,
       newValues: {
         ...payload,
-        tankQuantityAfterKg: stock.tank.currentQuantityKg,
-        filledQuantityAfter: stock.filled.currentQuantity,
+        tankQuantityAfterKg: quantityAfterKg,
       },
     });
 
     return {
       id: doc._id,
-      tankQuantityAfterKg: stock.tank.currentQuantityKg,
-      filledQuantityAfter: stock.filled.currentQuantity,
+      inventoryUpdate: {
+        tankCode: tank.tankCode,
+        tankName: tank.tankName,
+        quantityBeforeKg,
+        quantityAfterKg,
+        lpgUsedKg: qty.actualLpgUsedKg,
+        applied: batchStatus === 'completed',
+      },
     };
   });
 
   invalidateOps();
   const batch = await getFillingById(result.id);
   return {
-    ...batch.toObject(),
-    tankQuantityAfterKg: result.tankQuantityAfterKg,
-    filledQuantityAfter: result.filledQuantityAfter,
+    ...batch,
+    tankQuantityAfterKg: result.inventoryUpdate.quantityAfterKg,
+    inventoryUpdate: result.inventoryUpdate,
   };
 }
 
@@ -701,6 +891,8 @@ async function updateFilling(id, body, req) {
     const nextTankId = body.storageTankId || existing.storageTankId;
     const nextTypeId = body.cylinderTypeId || existing.cylinderTypeId;
     const nextEmployeeId = body.operatorEmployeeId || existing.operatorEmployeeId;
+    const previousStatus = batchStatusOf(existing);
+    const nextStatus = resolveBatchStatus(body, previousStatus);
     if (String(nextEmployeeId) !== String(existing.operatorEmployeeId)) {
       await assertEmployee(nextEmployeeId, session);
     }
@@ -713,8 +905,10 @@ async function updateFilling(id, body, req) {
       || qty.actualLpgUsedKg !== existing.actualLpgUsedKg
       || String(nextTankId) !== String(existing.storageTankId)
       || String(nextTypeId) !== String(existing.cylinderTypeId);
+    const wasCompleted = previousStatus === 'completed';
+    const willComplete = nextStatus === 'completed';
 
-    if (stockChanged) {
+    if (wasCompleted && willComplete && stockChanged) {
       await reverseFillingStock({
         storageTankId: existing.storageTankId,
         cylinderTypeId: existing.cylinderTypeId,
@@ -726,6 +920,20 @@ async function updateFilling(id, body, req) {
         cylinderTypeId: nextTypeId,
         cylinderCount: qty.cylinderCount,
         actualLpgUsedKg: qty.actualLpgUsedKg,
+      }, session);
+    } else if (!wasCompleted && willComplete) {
+      await applyFillingStock({
+        storageTankId: nextTankId,
+        cylinderTypeId: nextTypeId,
+        cylinderCount: qty.cylinderCount,
+        actualLpgUsedKg: qty.actualLpgUsedKg,
+      }, session);
+    } else if (wasCompleted && !willComplete) {
+      await reverseFillingStock({
+        storageTankId: existing.storageTankId,
+        cylinderTypeId: existing.cylinderTypeId,
+        cylinderCount: existing.cylinderCount,
+        actualLpgUsedKg: existing.actualLpgUsedKg,
       }, session);
     }
 
@@ -743,6 +951,7 @@ async function updateFilling(id, body, req) {
     existing.targetFillWeightKg = qty.targetFillWeightKg;
     existing.actualLpgUsedKg = qty.actualLpgUsedKg;
     existing.operatorEmployeeId = nextEmployeeId;
+    existing.batchStatus = nextStatus;
     if (body.fillingDate !== undefined) existing.fillingDate = body.fillingDate;
     if (body.remarks !== undefined) existing.remarks = body.remarks;
     await existing.save({ session });
@@ -778,6 +987,7 @@ const filling = {
   list: listFillings,
   getById: getFillingById,
   update: updateFilling,
+  getFormOptions: getFillingFormOptions,
 };
 
 module.exports = {

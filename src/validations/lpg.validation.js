@@ -8,7 +8,7 @@ const {
   listMasterQuery,
   atLeastOneField,
 } = require('./common.validation');
-const { RECEIPT_STATUS_VALUES } = require('../constants/masters');
+const { RECEIPT_STATUS_VALUES, BATCH_STATUS_VALUES } = require('../constants/masters');
 
 const optionalDate = z.coerce.date().optional();
 const optionalCode = code.optional();
@@ -48,11 +48,12 @@ const fillingCreateBody = {
   storageTankId: objectId.optional(),
   cylinderTypeId: objectId,
   cylinderCount: z.coerce.number().int().min(1),
-  targetFillWeightKg: positiveKg.optional(),
+  targetFillWeightKg: positiveKg,
   actualLpgUsedKg: positiveKg.optional(),
-  fillingDate: optionalDate,
+  fillingDate: z.coerce.date(),
   operatorEmployeeId: objectId,
-  remarks: z.string().trim().max(500).optional(),
+  remarks: z.string().trim().max(1000).optional(),
+  batchStatus: z.enum(BATCH_STATUS_VALUES).optional(),
 };
 
 const fillingUpdateBody = {
@@ -64,7 +65,8 @@ const fillingUpdateBody = {
   actualLpgUsedKg: positiveKg.optional(),
   fillingDate: optionalDate,
   operatorEmployeeId: objectId.optional(),
-  remarks: z.string().trim().max(500).optional(),
+  remarks: z.string().trim().max(1000).optional(),
+  batchStatus: z.enum(BATCH_STATUS_VALUES).optional(),
 };
 
 const receiptList = listMasterQuery({
@@ -80,6 +82,8 @@ const fillingList = listMasterQuery({
   storageTankId: objectId.optional(),
   cylinderTypeId: objectId.optional(),
   operatorEmployeeId: objectId.optional(),
+  batchStatus: z.enum(BATCH_STATUS_VALUES).optional(),
+  date: z.coerce.date().optional(),
   startDate: z.coerce.date().optional(),
   endDate: z.coerce.date().optional(),
 });

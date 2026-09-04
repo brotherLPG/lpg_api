@@ -48,6 +48,11 @@ const fillingBatchSchema = new mongoose.Schema(
       required: [true, 'createdByUserId is required'],
     },
     remarks: { type: String, trim: true, default: '' },
+    batchStatus: {
+      type: String,
+      enum: ['pending', 'completed'],
+      default: 'completed',
+    },
   },
   { timestamps: true }
 );
@@ -55,5 +60,6 @@ const fillingBatchSchema = new mongoose.Schema(
 fillingBatchSchema.index({ fillingDate: -1 });
 fillingBatchSchema.index({ storageTankId: 1, fillingDate: -1 });
 fillingBatchSchema.index({ cylinderTypeId: 1, fillingDate: -1 });
+fillingBatchSchema.index({ batchStatus: 1, fillingDate: -1 });
 
 module.exports = mongoose.model('FillingBatch', fillingBatchSchema);
