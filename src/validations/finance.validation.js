@@ -10,6 +10,8 @@ const {
 const {
   PAYMENT_TYPES,
   PAYMENT_METHODS,
+  PAYMENT_DIRECTION_VALUES,
+  PAYMENT_VOUCHER_STATUS_VALUES,
   SALE_STATUSES,
   SALE_TYPE_VALUES,
   PAYMENT_TERM_DAYS,
@@ -117,33 +119,64 @@ const salesReturn = {
   idParam: idParamSchema,
 };
 
+const paymentAllocation = z.object({
+  saleId: objectId,
+  amountApplied: positiveAmount,
+});
+
 const payment = {
   create: z.object({
     body: z.object({
       paymentNumber: optionalCode,
-      paymentType: z.enum(PAYMENT_TYPES),
+      paymentType: z.enum(PAYMENT_TYPES).optional(),
+      direction: z.enum(PAYMENT_DIRECTION_VALUES).optional(),
       customerId: objectId.optional(),
       supplierId: objectId.optional(),
       saleId: objectId.optional(),
       accountId: objectId,
       paymentAmount: positiveAmount,
-      paymentMethod: z.enum(PAYMENT_METHODS).optional(),
-      paymentDate: optionalDate,
+      paymentMethod: z.enum(PAYMENT_METHODS),
+      paymentDate: z.coerce.date(),
       referenceNumber: z.string().trim().max(80).optional(),
       remarks: z.string().trim().max(500).optional(),
+      allocations: z.array(paymentAllocation).optional(),
+      saveAsDraft: z.boolean().optional(),
     }).superRefine((data, ctx) => {
-      if (data.paymentType === 'receive' || data.paymentType === 'refund') {
-        if (!data.customerId && !data.saleId) {
+      const paymentType = data.paymentType || data.direction;
+      if (!paymentType) {
+        ctx.addIssue({ code: 'custom', message: 'paymentType or direction is required', path: ['paymentType'] });
+        return;
+      }
+      if (paymentType === 'receive' || paymentType === 'refund') {
+        if (!data.customerId && !data.saleId && !(data.allocations && data.allocations.length)) {
           ctx.addIssue({ code: 'custom', message: 'customerId or saleId is required for this paymentType' });
         }
         if (data.supplierId) {
           ctx.addIssue({ code: 'custom', message: 'supplierId is not allowed for receive/refund' });
         }
       }
-      if (data.paymentType === 'pay' && !data.supplierId) {
+      if (paymentType === 'pay' && !data.supplierId) {
         ctx.addIssue({ code: 'custom', message: 'supplierId is required when paymentType is pay' });
       }
     }),
+  }),
+  update: z.object({
+    params: z.object({ id: objectId }),
+    body: atLeastOneField(
+      z.object({
+        paymentDate: optionalDate,
+        paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+        accountId: objectId.optional(),
+        paymentAmount: positiveAmount.optional(),
+        referenceNumber: z.string().trim().max(80).optional(),
+        remarks: z.string().trim().max(500).optional(),
+        allocations: z.array(paymentAllocation).optional(),
+        customerId: objectId.optional(),
+        supplierId: objectId.optional(),
+        paymentStatus: z.enum(PAYMENT_VOUCHER_STATUS_VALUES).optional(),
+        saveAsDraft: z.boolean().optional(),
+      })
+    ),
   }),
   list: listMasterQuery({
     customerId: objectId.optional(),
@@ -151,6 +184,9 @@ const payment = {
     saleId: objectId.optional(),
     accountId: objectId.optional(),
     paymentType: z.enum(PAYMENT_TYPES).optional(),
+    direction: z.enum(PAYMENT_DIRECTION_VALUES).optional(),
+    paymentStatus: z.enum(PAYMENT_VOUCHER_STATUS_VALUES).optional(),
+    status: z.enum(PAYMENT_VOUCHER_STATUS_VALUES).optional(),
     startDate: z.coerce.date().optional(),
     endDate: z.coerce.date().optional(),
   }),

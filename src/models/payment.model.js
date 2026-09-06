@@ -1,5 +1,21 @@
 const mongoose = require('mongoose');
-const { PAYMENT_TYPES, PAYMENT_METHODS } = require('../constants/masters');
+const { PAYMENT_TYPES, PAYMENT_METHODS, PAYMENT_VOUCHER_STATUS_VALUES } = require('../constants/masters');
+
+const allocationSchema = new mongoose.Schema(
+  {
+    saleId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Sale',
+      required: true,
+    },
+    amountApplied: {
+      type: Number,
+      required: true,
+      min: [0.01, 'amountApplied must be greater than 0'],
+    },
+  },
+  { _id: false }
+);
 
 const paymentSchema = new mongoose.Schema(
   {
@@ -48,6 +64,15 @@ const paymentSchema = new mongoose.Schema(
       ref: 'Sale',
       default: null,
     },
+    allocations: {
+      type: [allocationSchema],
+      default: [],
+    },
+    paymentStatus: {
+      type: String,
+      enum: PAYMENT_VOUCHER_STATUS_VALUES,
+      default: 'recorded',
+    },
     referenceNumber: { type: String, trim: true, default: '' },
     remarks: { type: String, trim: true, default: '' },
     receivedOrPaidByUserId: {
@@ -63,5 +88,6 @@ paymentSchema.index({ customerId: 1, paymentDate: -1 });
 paymentSchema.index({ supplierId: 1, paymentDate: -1 });
 paymentSchema.index({ saleId: 1 });
 paymentSchema.index({ accountId: 1, paymentDate: -1 });
+paymentSchema.index({ paymentType: 1, paymentStatus: 1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);

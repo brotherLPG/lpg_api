@@ -83,6 +83,26 @@ const SALE_STATUS_OPTIONS = [
 ];
 const PAYMENT_TYPES = ['receive', 'pay', 'refund'];
 const PAYMENT_METHODS = ['cash', 'bank', 'cheque', 'online'];
+const PAYMENT_METHOD_OPTIONS = [
+  { value: 'cash', label: 'Cash' },
+  { value: 'bank', label: 'Bank Transfer' },
+  { value: 'cheque', label: 'Cheque' },
+  { value: 'online', label: 'Online' },
+];
+const PAYMENT_DIRECTIONS = [
+  { value: 'receive', label: 'Customer Receipt' },
+  { value: 'pay', label: 'Supplier Payment' },
+];
+const PAYMENT_DIRECTION_OPTIONS = [
+  { value: 'receive', label: 'Customer Receipt (Inward)' },
+  { value: 'pay', label: 'Supplier Payment (Outward)' },
+];
+const PAYMENT_DIRECTION_VALUES = PAYMENT_DIRECTIONS.map((item) => item.value);
+const PAYMENT_VOUCHER_STATUSES = [
+  { value: 'recorded', label: 'Recorded' },
+  { value: 'pending', label: 'Pending' },
+];
+const PAYMENT_VOUCHER_STATUS_VALUES = PAYMENT_VOUCHER_STATUSES.map((item) => item.value);
 const ASSET_CATEGORIES = ['plant', 'vehicle', 'filling-machine', 'compressor', 'tank', 'building', 'furniture', 'other'];
 const MAINTENANCE_ASSET_STATUSES = ['operational', 'maintenance', 'breakdown', 'retired'];
 const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection', 'emergency'];
@@ -171,6 +191,12 @@ module.exports = {
   PAYMENT_STATUS_OPTIONS,
   PAYMENT_TYPES,
   PAYMENT_METHODS,
+  PAYMENT_METHOD_OPTIONS,
+  PAYMENT_DIRECTIONS,
+  PAYMENT_DIRECTION_OPTIONS,
+  PAYMENT_DIRECTION_VALUES,
+  PAYMENT_VOUCHER_STATUSES,
+  PAYMENT_VOUCHER_STATUS_VALUES,
   ASSET_CATEGORIES,
   MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,

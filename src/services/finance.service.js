@@ -9,6 +9,7 @@ const {
   InventoryItem,
   Account,
   ExpenseCategory,
+  LPGReceipt,
 } = require('../models');
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
@@ -23,6 +24,10 @@ const {
   GST_TAX_RATE,
   RETURN_REASONS,
   RETURN_ACTION_TYPE,
+  PAYMENT_METHOD_OPTIONS,
+  PAYMENT_DIRECTIONS,
+  PAYMENT_DIRECTION_OPTIONS,
+  PAYMENT_VOUCHER_STATUSES,
 } = require('../constants/masters');
 
 const SALE_POPULATE = [
@@ -43,6 +48,7 @@ const PAYMENT_POPULATE = [
   { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber isActive' },
   { path: 'accountId', select: 'accountCode accountName accountType currentBalanceAmount' },
   { path: 'saleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount paymentStatus' },
+  { path: 'allocations.saleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount paymentStatus' },
   { path: 'receivedOrPaidByUserId', select: 'fullName emailAddress' },
 ];
 
@@ -420,7 +426,16 @@ async function getReturnById(id) {
 async function getPaymentById(id) {
   const doc = await populateQuery(Payment.findById(id), PAYMENT_POPULATE);
   if (!doc) throw new ApiError(404, 'Payment not found');
-  return doc;
+  const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  const mapped = toPaymentItem(plain);
+  return {
+    ...mapped,
+    form: await getPaymentFormOptions({
+      customerId: mapped.customerId || undefined,
+      supplierId: mapped.supplierId || undefined,
+      paymentType: mapped.paymentType,
+    }),
+  };
 }
 
 async function getExpenseById(id) {
@@ -792,26 +807,346 @@ async function getReturnFormOptions(query = {}) {
   };
 }
 
-const listPayments = listDocs(
-  Payment,
-  (query) => {
-    const filter = applyDateRange({}, 'paymentDate', query);
-    if (query.customerId) filter.customerId = query.customerId;
-    if (query.supplierId) filter.supplierId = query.supplierId;
-    if (query.saleId) filter.saleId = query.saleId;
-    if (query.accountId) filter.accountId = query.accountId;
-    if (query.paymentType) filter.paymentType = query.paymentType;
-    if (query.search) {
-      filter.$or = [
-        { paymentNumber: { $regex: query.search, $options: 'i' } },
-        { referenceNumber: { $regex: query.search, $options: 'i' } },
-      ];
+function formatRs(value) {
+  return `Rs. ${roundMoney(value).toLocaleString('en-US')}`;
+}
+
+function paymentTypeOf(body) {
+  return body.paymentType || body.direction;
+}
+
+function paymentAllocationsOf(doc) {
+  if (Array.isArray(doc.allocations) && doc.allocations.length) {
+    return doc.allocations;
+  }
+  if (doc.saleId) {
+    return [{ saleId: doc.saleId, amountApplied: doc.paymentAmount }];
+  }
+  return [];
+}
+
+function normalizeAllocations(body) {
+  if (Array.isArray(body.allocations) && body.allocations.length) {
+    return body.allocations
+      .filter((item) => item.saleId && Number(item.amountApplied) > 0)
+      .map((item) => ({
+        saleId: item.saleId,
+        amountApplied: roundMoney(item.amountApplied),
+      }));
+  }
+  if (body.saleId) {
+    return [{ saleId: body.saleId, amountApplied: roundMoney(body.paymentAmount) }];
+  }
+  return [];
+}
+
+function paymentMethodLabel(value) {
+  return PAYMENT_METHOD_OPTIONS.find((item) => item.value === value)?.label || value;
+}
+
+function paymentDirectionLabel(value) {
+  return PAYMENT_DIRECTIONS.find((item) => item.value === value)?.label || value;
+}
+
+function paymentVoucherStatusLabel(value) {
+  return PAYMENT_VOUCHER_STATUSES.find((item) => item.value === value)?.label || value || 'Recorded';
+}
+
+function toPaymentItem(doc) {
+  const customer = doc.customerId && typeof doc.customerId === 'object' ? doc.customerId : null;
+  const supplier = doc.supplierId && typeof doc.supplierId === 'object' ? doc.supplierId : null;
+  const account = doc.accountId && typeof doc.accountId === 'object' ? doc.accountId : null;
+  const paymentType = doc.paymentType;
+  const paymentStatus = doc.paymentStatus || 'recorded';
+  const allocations = paymentAllocationsOf(doc).map((line) => {
+    const sale = line.saleId && typeof line.saleId === 'object' ? line.saleId : null;
+    return {
+      saleId: sale?._id || line.saleId,
+      invoiceNumber: sale?.invoiceNumber || '',
+      amountApplied: roundMoney(line.amountApplied),
+      outstandingAmount: sale ? roundMoney(sale.outstandingAmount) : null,
+    };
+  });
+
+  return {
+    _id: doc._id,
+    paymentNumber: doc.paymentNumber,
+    paymentDate: doc.paymentDate,
+    paymentType,
+    direction: paymentType === 'pay' ? 'pay' : 'receive',
+    directionLabel: paymentDirectionLabel(paymentType === 'refund' ? 'receive' : paymentType),
+    customerId: customer?._id || doc.customerId || null,
+    supplierId: supplier?._id || doc.supplierId || null,
+    partyName: customer?.customerName || supplier?.supplierName || '',
+    partyCode: customer?.customerCode || supplier?.supplierCode || '',
+    partyType: supplier ? 'supplier' : customer ? 'customer' : null,
+    accountId: account?._id || doc.accountId,
+    accountName: account ? `${account.accountCode} – ${account.accountName}` : '',
+    paymentAmount: roundMoney(doc.paymentAmount),
+    paymentMethod: doc.paymentMethod,
+    paymentMethodLabel: paymentMethodLabel(doc.paymentMethod),
+    paymentStatus,
+    paymentStatusLabel: paymentVoucherStatusLabel(paymentStatus),
+    referenceNumber: doc.referenceNumber || '',
+    remarks: doc.remarks || '',
+    allocations,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+async function nextPaymentNumber(session) {
+  const year = new Date().getFullYear();
+  return nextSequentialCode(Payment, 'paymentNumber', `PAY-${year}`, 4, session);
+}
+
+async function customerLedgerOutstanding(customerId, session) {
+  const pipeline = Sale.aggregate([
+    { $match: { customerId, saleStatus: { $nin: ['cancelled', 'draft'] } } },
+    { $group: { _id: null, outstanding: { $sum: '$outstandingAmount' } } },
+  ]);
+  if (session) pipeline.session(session);
+  const [row] = await pipeline;
+  let customerQuery = Customer.findById(customerId).select('openingBalanceAmount');
+  if (session) customerQuery = customerQuery.session(session);
+  const customer = await customerQuery;
+  return roundMoney((row?.outstanding || 0) + (customer?.openingBalanceAmount || 0));
+}
+
+async function supplierLedgerOutstanding(supplierId, session) {
+  const purchases = LPGReceipt.aggregate([
+    { $match: { supplierId, receiptStatus: 'confirmed' } },
+    { $group: { _id: null, total: { $sum: '$totalPurchaseAmount' } } },
+  ]);
+  const paid = Payment.aggregate([
+    { $match: { supplierId, paymentType: 'pay', paymentStatus: { $ne: 'pending' } } },
+    { $group: { _id: null, total: { $sum: '$paymentAmount' } } },
+  ]);
+  if (session) {
+    purchases.session(session);
+    paid.session(session);
+  }
+  const [[purchaseRow], [paidRow]] = await Promise.all([purchases, paid]);
+  let supplierQuery = Supplier.findById(supplierId).select('openingBalanceAmount');
+  if (session) supplierQuery = supplierQuery.session(session);
+  const supplier = await supplierQuery;
+  return roundMoney((supplier?.openingBalanceAmount || 0) + (purchaseRow?.total || 0) - (paidRow?.total || 0));
+}
+
+async function outstandingSalesForCustomer(customerId) {
+  const sales = await Sale.find({
+    customerId,
+    saleStatus: { $nin: ['draft', 'cancelled'] },
+    outstandingAmount: { $gt: 0 },
+  })
+    .select('invoiceNumber saleNumber invoiceDate totalAmount outstandingAmount paidAmount')
+    .sort({ invoiceDate: 1, createdAt: 1 })
+    .lean();
+
+  return sales.map((sale) => ({
+    _id: sale._id,
+    invoiceNumber: sale.invoiceNumber,
+    saleNumber: sale.saleNumber || sale.invoiceNumber,
+    invoiceDate: sale.invoiceDate,
+    totalAmount: roundMoney(sale.totalAmount),
+    outstandingAmount: roundMoney(sale.outstandingAmount),
+    paidAmount: roundMoney(sale.paidAmount),
+    label: `${sale.invoiceNumber} – Outstanding ${formatRs(sale.outstandingAmount)}`,
+  }));
+}
+
+function buildAllocationRemarks(allocations, invoices, paymentAmount) {
+  if (!allocations.length) {
+    return `${formatRs(paymentAmount)} recorded on account`;
+  }
+  return allocations.map((alloc) => {
+    const invoice = invoices.find((item) => String(item._id) === String(alloc.saleId));
+    const invoiceNumber = invoice?.invoiceNumber || 'invoice';
+    const newBal = invoice ? roundMoney(invoice.outstandingAmount - alloc.amountApplied) : 0;
+    return `${formatRs(alloc.amountApplied)} applied to ${invoiceNumber} (New Bal: ${formatRs(newBal)})`;
+  }).join('; ');
+}
+
+async function loadAndValidateAllocations(allocations, { customerId, paymentAmount, paymentType }, session) {
+  if (!allocations.length) return [];
+  if (paymentType !== 'receive' && paymentType !== 'refund') {
+    throw new ApiError(400, 'Invoice allocations are only allowed for customer receipts');
+  }
+
+  const totalApplied = roundMoney(allocations.reduce((sum, item) => sum + item.amountApplied, 0));
+  if (totalApplied > paymentAmount) {
+    throw new ApiError(400, 'Allocated amount cannot exceed payment amount');
+  }
+
+  const loaded = [];
+  for (const alloc of allocations) {
+    let saleQuery = Sale.findById(alloc.saleId);
+    if (session) saleQuery = saleQuery.session(session);
+    const sale = await saleQuery;
+    if (!sale) throw new ApiError(400, 'Allocated sale invoice not found');
+    if (sale.saleStatus === 'cancelled' || sale.saleStatus === 'draft') {
+      throw new ApiError(400, 'Cannot allocate to a cancelled or draft sale');
     }
-    return filter;
-  },
-  PAYMENT_POPULATE,
-  { paymentDate: -1, createdAt: -1 }
-);
+    if (customerId && String(sale.customerId) !== String(customerId)) {
+      throw new ApiError(400, 'Allocated invoice does not belong to the selected customer');
+    }
+    if (alloc.amountApplied > sale.outstandingAmount) {
+      throw new ApiError(400, `Payment exceeds outstanding amount on ${sale.invoiceNumber}`);
+    }
+    loaded.push({ sale, amountApplied: alloc.amountApplied });
+  }
+  return loaded;
+}
+
+async function postPaymentEffects({ paymentType, accountId, paymentAmount, allocations }, session) {
+  if (paymentType === 'receive') {
+    await changeAccount(accountId, paymentAmount, session);
+    for (const alloc of allocations) {
+      await applySalePayment(alloc.sale, alloc.amountApplied, session);
+    }
+    return;
+  }
+  if (paymentType === 'refund') {
+    if (!allocations.length) throw new ApiError(400, 'saleId is required for refund');
+    await changeAccount(accountId, -paymentAmount, session);
+    for (const alloc of allocations) {
+      if (alloc.amountApplied > alloc.sale.paidAmount) {
+        throw new ApiError(400, 'Refund exceeds paid amount');
+      }
+      await applySalePayment(alloc.sale, -alloc.amountApplied, session);
+    }
+    return;
+  }
+  if (paymentType === 'pay') {
+    await changeAccount(accountId, -paymentAmount, session);
+  }
+}
+
+async function reversePaymentEffects(payment, session) {
+  const allocations = paymentAllocationsOf(payment);
+  if (payment.paymentType === 'receive') {
+    await changeAccount(payment.accountId, -payment.paymentAmount, session);
+    for (const alloc of allocations) {
+      const sale = await Sale.findById(alloc.saleId?._id || alloc.saleId).session(session);
+      if (sale) await applySalePayment(sale, -alloc.amountApplied, session);
+    }
+    return;
+  }
+  if (payment.paymentType === 'refund') {
+    await changeAccount(payment.accountId, payment.paymentAmount, session);
+    for (const alloc of allocations) {
+      const sale = await Sale.findById(alloc.saleId?._id || alloc.saleId).session(session);
+      if (sale) await applySalePayment(sale, alloc.amountApplied, session);
+    }
+    return;
+  }
+  if (payment.paymentType === 'pay') {
+    await changeAccount(payment.accountId, payment.paymentAmount, session);
+  }
+}
+
+async function listPayments(query) {
+  const { page, limit, skip } = parsePagination(query);
+  const filter = applyDateRange({}, 'paymentDate', query);
+  if (query.customerId) filter.customerId = query.customerId;
+  if (query.supplierId) filter.supplierId = query.supplierId;
+  if (query.saleId) filter.saleId = query.saleId;
+  if (query.accountId) filter.accountId = query.accountId;
+  const paymentType = query.paymentType || query.direction;
+  if (paymentType) filter.paymentType = paymentType;
+  const paymentStatus = query.paymentStatus || query.status;
+  if (paymentStatus) filter.paymentStatus = paymentStatus;
+
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    const [customers, suppliers] = await Promise.all([
+      Customer.find({ $or: [{ customerName: regex }, { customerCode: regex }] }).select('_id'),
+      Supplier.find({ $or: [{ supplierName: regex }, { supplierCode: regex }] }).select('_id'),
+    ]);
+    filter.$or = [
+      { paymentNumber: regex },
+      { referenceNumber: regex },
+      { remarks: regex },
+      { customerId: { $in: customers.map((item) => item._id) } },
+      { supplierId: { $in: suppliers.map((item) => item._id) } },
+    ];
+  }
+
+  const findQuery = populateQuery(
+    Payment.find(filter).sort({ paymentDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+    PAYMENT_POPULATE
+  );
+  const [items, total] = await Promise.all([
+    findQuery.lean(),
+    Payment.countDocuments(filter),
+  ]);
+
+  return {
+    ...paginated(items.map(toPaymentItem), total, page, limit),
+    meta: {
+      directions: PAYMENT_DIRECTIONS,
+      paymentMethods: PAYMENT_METHOD_OPTIONS,
+      statuses: PAYMENT_VOUCHER_STATUSES,
+    },
+  };
+}
+
+async function getPaymentFormOptions(query = {}) {
+  const paymentType = query.paymentType || query.direction;
+  const [nextNumber, customers, suppliers, accounts] = await Promise.all([
+    nextPaymentNumber(),
+    Customer.find({ isActive: true }).select('customerCode customerName phoneNumber').sort({ customerName: 1 }).lean(),
+    Supplier.find({ isActive: true }).select('supplierCode supplierName phoneNumber').sort({ supplierName: 1 }).lean(),
+    Account.find({ isActive: true, accountType: { $in: ['cash', 'bank'] } })
+      .select('accountCode accountName accountType isPrimary currentBalanceAmount')
+      .sort({ isPrimary: -1, accountName: 1 })
+      .lean(),
+  ]);
+
+  let ledgerBalance = 0;
+  let outstandingInvoices = [];
+  if (query.customerId) {
+    [ledgerBalance, outstandingInvoices] = await Promise.all([
+      customerLedgerOutstanding(query.customerId),
+      outstandingSalesForCustomer(query.customerId),
+    ]);
+  } else if (query.supplierId) {
+    ledgerBalance = await supplierLedgerOutstanding(query.supplierId);
+  }
+
+  return {
+    nextPaymentNumber: nextNumber,
+    directions: PAYMENT_DIRECTION_OPTIONS,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
+    statuses: PAYMENT_VOUCHER_STATUSES,
+    paymentType: paymentType || null,
+    ledgerBalance,
+    ledgerBalanceLabel: query.customerId || query.supplierId
+      ? `${formatRs(ledgerBalance)} Outstanding`
+      : '',
+    outstandingInvoices,
+    customers: customers.map((customer) => ({
+      _id: customer._id,
+      customerCode: customer.customerCode,
+      customerName: customer.customerName,
+      label: `${customer.customerCode} – ${customer.customerName}`,
+    })),
+    suppliers: suppliers.map((supplier) => ({
+      _id: supplier._id,
+      supplierCode: supplier.supplierCode,
+      supplierName: supplier.supplierName,
+      label: `${supplier.supplierCode} – ${supplier.supplierName}`,
+    })),
+    accounts: accounts.map((account) => ({
+      _id: account._id,
+      accountCode: account.accountCode,
+      accountName: account.accountName,
+      accountType: account.accountType,
+      isPrimary: Boolean(account.isPrimary),
+      label: `${account.accountCode} – ${account.accountName}`,
+    })),
+  };
+}
 
 const listExpenses = listDocs(
   Expense,
@@ -1098,47 +1433,48 @@ async function createReturn(body, req) {
 
 async function createPayment(body, req) {
   const result = await withTransaction(async (session) => {
-    const paymentType = body.paymentType;
+    const paymentType = paymentTypeOf(body);
+    if (!paymentType) throw new ApiError(400, 'paymentType or direction is required');
+
     let customerId = body.customerId || null;
     let supplierId = body.supplierId || null;
-    let sale = null;
+    const isDraft = body.saveAsDraft === true;
+    const allocations = normalizeAllocations(body);
 
-    if (body.saleId) {
-      sale = await Sale.findById(body.saleId).session(session);
-      if (!sale) throw new ApiError(400, 'Sale not found');
-      if (sale.saleStatus === 'cancelled') throw new ApiError(400, 'Cannot pay a cancelled sale');
-      customerId = customerId || sale.customerId;
-      if (String(customerId) !== String(sale.customerId)) {
-        throw new ApiError(400, 'customerId does not match the sale');
-      }
+    if (allocations[0]?.saleId && !customerId && paymentType !== 'pay') {
+      const firstSale = await Sale.findById(allocations[0].saleId).session(session);
+      customerId = firstSale?.customerId || customerId;
     }
 
     if (customerId) await assertCustomer(customerId, session);
     if (supplierId) await assertSupplier(supplierId, session);
     await assertAccount(body.accountId, session);
 
-    if (paymentType === 'receive') {
-      if (sale) {
-        const maxPay = sale.outstandingAmount;
-        if (maxPay <= 0) throw new ApiError(400, 'Sale has no outstanding amount');
-        if (body.paymentAmount > maxPay) {
-          throw new ApiError(400, 'Payment exceeds sale outstanding amount');
-        }
-      }
-      await changeAccount(body.accountId, body.paymentAmount, session);
-      if (sale) await applySalePayment(sale, body.paymentAmount, session);
-    } else if (paymentType === 'refund') {
-      if (!sale) throw new ApiError(400, 'saleId is required for refund');
-      if (body.paymentAmount > sale.paidAmount) {
-        throw new ApiError(400, 'Refund exceeds paid amount');
-      }
-      await changeAccount(body.accountId, -body.paymentAmount, session);
-      if (sale) await applySalePayment(sale, -body.paymentAmount, session);
-    } else if (paymentType === 'pay') {
-      await changeAccount(body.accountId, -body.paymentAmount, session);
+    const loadedAllocations = await loadAndValidateAllocations(
+      allocations,
+      { customerId, paymentAmount: body.paymentAmount, paymentType },
+      session
+    );
+
+    if (!isDraft) {
+      await postPaymentEffects({
+        paymentType,
+        accountId: body.accountId,
+        paymentAmount: body.paymentAmount,
+        allocations: loadedAllocations,
+      }, session);
     }
 
-    const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', body.paymentNumber, session);
+    const invoices = loadedAllocations.map((item) => ({
+      _id: item.sale._id,
+      invoiceNumber: item.sale.invoiceNumber,
+      outstandingAmount: item.sale.outstandingAmount + (isDraft ? 0 : item.amountApplied),
+    }));
+    const remarks = body.remarks || buildAllocationRemarks(allocations, invoices, body.paymentAmount);
+    const paymentNumber = body.paymentNumber
+      ? await assignNumber(Payment, 'paymentNumber', 'PAY', body.paymentNumber, session)
+      : await nextPaymentNumber(session);
+
     const [doc] = await Payment.create(
       [
         {
@@ -1146,13 +1482,15 @@ async function createPayment(body, req) {
           paymentType,
           customerId,
           supplierId,
-          saleId: sale?._id || null,
+          saleId: allocations[0]?.saleId || null,
+          allocations,
           accountId: body.accountId,
           paymentAmount: body.paymentAmount,
           paymentMethod: body.paymentMethod || 'cash',
-          paymentDate: body.paymentDate || new Date(),
+          paymentDate: body.paymentDate,
+          paymentStatus: isDraft ? 'pending' : 'recorded',
           referenceNumber: body.referenceNumber || '',
-          remarks: body.remarks || '',
+          remarks,
           receivedOrPaidByUserId: req.user._id,
         },
       ],
@@ -1166,7 +1504,7 @@ async function createPayment(body, req) {
       moduleName: 'payments',
       entityName: 'Payment',
       entityId: doc._id,
-      newValues: { paymentNumber, paymentType, paymentAmount: body.paymentAmount },
+      newValues: { paymentNumber, paymentType, paymentAmount: body.paymentAmount, paymentStatus: doc.paymentStatus },
     });
 
     return doc._id;
@@ -1174,6 +1512,115 @@ async function createPayment(body, req) {
 
   invalidateFinance();
   return getPaymentById(result);
+}
+
+async function updatePayment(id, body, req) {
+  const result = await withTransaction(async (session) => {
+    const payment = await Payment.findById(id).session(session);
+    if (!payment) throw new ApiError(404, 'Payment not found');
+
+    if (payment.paymentStatus === 'recorded') {
+      if (body.remarks !== undefined) payment.remarks = body.remarks;
+      if (body.referenceNumber !== undefined) payment.referenceNumber = body.referenceNumber;
+      await payment.save({ session });
+      await writeAudit({
+        req,
+        session,
+        actionName: 'update',
+        moduleName: 'payments',
+        entityName: 'Payment',
+        entityId: payment._id,
+        newValues: body,
+      });
+      return payment._id;
+    }
+
+    const postingNow = body.paymentStatus === 'recorded' || body.saveAsDraft === false;
+
+    if (body.paymentDate !== undefined) payment.paymentDate = body.paymentDate;
+    if (body.paymentMethod !== undefined) payment.paymentMethod = body.paymentMethod;
+    if (body.accountId !== undefined) {
+      await assertAccount(body.accountId, session);
+      payment.accountId = body.accountId;
+    }
+    if (body.paymentAmount !== undefined) payment.paymentAmount = body.paymentAmount;
+    if (body.referenceNumber !== undefined) payment.referenceNumber = body.referenceNumber;
+    if (body.customerId !== undefined) {
+      await assertCustomer(body.customerId, session);
+      payment.customerId = body.customerId;
+    }
+    if (body.supplierId !== undefined) {
+      await assertSupplier(body.supplierId, session);
+      payment.supplierId = body.supplierId;
+    }
+    if (body.allocations !== undefined) {
+      const allocations = normalizeAllocations({ ...body, paymentAmount: payment.paymentAmount, saleId: body.saleId });
+      await loadAndValidateAllocations(
+        allocations,
+        { customerId: payment.customerId, paymentAmount: payment.paymentAmount, paymentType: payment.paymentType },
+        session
+      );
+      payment.allocations = allocations;
+      payment.saleId = allocations[0]?.saleId || null;
+    }
+    if (body.remarks !== undefined) payment.remarks = body.remarks;
+
+    if (postingNow) {
+      const allocations = normalizeAllocations({
+        allocations: payment.allocations,
+        saleId: payment.saleId,
+        paymentAmount: payment.paymentAmount,
+      });
+      const loadedAllocations = await loadAndValidateAllocations(
+        allocations,
+        { customerId: payment.customerId, paymentAmount: payment.paymentAmount, paymentType: payment.paymentType },
+        session
+      );
+      await postPaymentEffects({
+        paymentType: payment.paymentType,
+        accountId: payment.accountId,
+        paymentAmount: payment.paymentAmount,
+        allocations: loadedAllocations,
+      }, session);
+      payment.paymentStatus = 'recorded';
+    }
+
+    await payment.save({ session });
+    await writeAudit({
+      req,
+      session,
+      actionName: 'update',
+      moduleName: 'payments',
+      entityName: 'Payment',
+      entityId: payment._id,
+      newValues: body,
+    });
+    return payment._id;
+  });
+
+  invalidateFinance();
+  return getPaymentById(result);
+}
+
+async function removePayment(id, req) {
+  await withTransaction(async (session) => {
+    const payment = await Payment.findById(id).session(session);
+    if (!payment) throw new ApiError(404, 'Payment not found');
+    if (payment.paymentStatus === 'recorded') {
+      await reversePaymentEffects(payment, session);
+    }
+    await payment.deleteOne({ session });
+    await writeAudit({
+      req,
+      session,
+      actionName: 'delete',
+      moduleName: 'payments',
+      entityName: 'Payment',
+      entityId: id,
+      oldValues: { paymentNumber: payment.paymentNumber, paymentAmount: payment.paymentAmount },
+    });
+  });
+  invalidateFinance();
 }
 
 async function createExpense(body, req) {
@@ -1290,7 +1737,14 @@ const salesReturn = {
   getById: getReturnById,
   getFormOptions: getReturnFormOptions,
 };
-const payment = { create: createPayment, list: listPayments, getById: getPaymentById };
+const payment = {
+  create: createPayment,
+  list: listPayments,
+  getById: getPaymentById,
+  update: updatePayment,
+  remove: removePayment,
+  getFormOptions: getPaymentFormOptions,
+};
 const expense = {
   create: createExpense,
   list: listExpenses,

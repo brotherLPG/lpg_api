@@ -26,8 +26,6 @@ const payments = createMasterRouter({
   moduleName: 'payments',
   controller: paymentController,
   schemas: payment,
-  allowUpdate: false,
-  allowDelete: false,
 });
 
 const expenses = createMasterRouter({
