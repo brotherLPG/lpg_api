@@ -15,11 +15,18 @@ const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
+const {
+  PAYMENT_TERMS,
+  SALE_TYPES,
+  SALE_STATUS_OPTIONS,
+  PAYMENT_STATUS_OPTIONS,
+  GST_TAX_RATE,
+} = require('../constants/masters');
 
 const SALE_POPULATE = [
-  { path: 'customerId', select: 'customerCode customerName phoneNumber creditLimitAmount isActive' },
+  { path: 'customerId', select: 'customerCode customerName phoneNumber creditLimitAmount paymentTermDays isActive' },
   { path: 'createdByUserId', select: 'fullName emailAddress' },
-  { path: 'lineItems.inventoryItemId', select: 'itemCode itemName itemCategory unitOfMeasure currentQuantity' },
+  { path: 'lineItems.inventoryItemId', select: 'itemCode itemName itemCategory unitOfMeasure currentQuantity unitSellingPriceAmount' },
 ];
 
 const RETURN_POPULATE = [
@@ -186,13 +193,14 @@ async function buildSaleLines(rawLines, session) {
     if (!item.isActive) throw new ApiError(400, `Inventory item ${item.itemCode} is inactive`);
 
     const quantity = raw.quantity;
-    const unitPriceAmount = raw.unitPriceAmount ?? item.cylinderTypeId?.sellingPricePerCylinder ?? 0;
+    const unitPriceAmount = raw.unitPriceAmount ?? defaultUnitPrice(item);
     const discountAmount = raw.discountAmount || 0;
-    const taxAmount = raw.taxAmount || 0;
-    const lineTotalAmount = roundMoney(quantity * unitPriceAmount - discountAmount + taxAmount);
-    if (lineTotalAmount < 0) {
+    const taxableAmount = roundMoney(quantity * unitPriceAmount - discountAmount);
+    if (taxableAmount < 0) {
       throw new ApiError(400, 'Line total cannot be negative');
     }
+    const taxAmount = roundMoney(taxableAmount * GST_TAX_RATE);
+    const lineTotalAmount = roundMoney(taxableAmount + taxAmount);
 
     lines.push({
       inventoryItemId: item._id,
@@ -207,17 +215,162 @@ async function buildSaleLines(rawLines, session) {
   return lines;
 }
 
-function totalsFromLines(lines) {
-  const subtotalAmount = roundMoney(lines.reduce((sum, line) => sum + line.quantity * line.unitPriceAmount, 0));
-  const discountAmount = roundMoney(lines.reduce((sum, line) => sum + line.discountAmount, 0));
-  const taxAmount = roundMoney(lines.reduce((sum, line) => sum + line.taxAmount, 0));
-  const totalAmount = roundMoney(subtotalAmount - discountAmount + taxAmount);
-  return { subtotalAmount, discountAmount, taxAmount, totalAmount };
+function defaultUnitPrice(item) {
+  if (item.unitSellingPriceAmount) return item.unitSellingPriceAmount;
+  if (item.cylinderTypeId?.sellingPricePerCylinder) return item.cylinderTypeId.sellingPricePerCylinder;
+  if (item.cylinderTypeId?.refillPriceAmount) return item.cylinderTypeId.refillPriceAmount;
+  return 0;
+}
+
+function totalsFromLines(lines, tradeDiscountAmount = 0) {
+  const subtotalAmount = roundMoney(
+    lines.reduce((sum, line) => sum + (line.quantity * line.unitPriceAmount - (line.discountAmount || 0)), 0)
+  );
+  const lineDiscountAmount = roundMoney(lines.reduce((sum, line) => sum + (line.discountAmount || 0), 0));
+  const tradeDiscount = roundMoney(tradeDiscountAmount || 0);
+  if (tradeDiscount > subtotalAmount) {
+    throw new ApiError(400, 'Trade discount cannot exceed subtotal');
+  }
+  const taxableAmount = roundMoney(subtotalAmount - tradeDiscount);
+  const taxAmount = roundMoney(taxableAmount * GST_TAX_RATE);
+  const totalAmount = roundMoney(taxableAmount + taxAmount);
+  return {
+    subtotalAmount,
+    discountAmount: lineDiscountAmount,
+    tradeDiscountAmount: tradeDiscount,
+    taxAmount,
+    totalAmount,
+  };
+}
+
+function paymentStatusLabel(status) {
+  return PAYMENT_STATUS_OPTIONS.find((item) => item.value === status)?.label || status;
+}
+
+function saleStatusLabel(status) {
+  return SALE_STATUS_OPTIONS.find((item) => item.value === status)?.label || status;
+}
+
+function saleTypeOf(sale) {
+  if (sale.saleType === 'cash' || sale.saleType === 'credit') return sale.saleType;
+  return (sale.outstandingAmount || 0) > 0 ? 'credit' : 'cash';
+}
+
+function itemQuantityOf(sale) {
+  return (sale.lineItems || []).reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
+}
+
+function toSaleItem(sale) {
+  const customer = sale.customerId && typeof sale.customerId === 'object' ? sale.customerId : null;
+  const saleType = saleTypeOf(sale);
+  const lineItems = (sale.lineItems || []).map((line) => {
+    const item = line.inventoryItemId && typeof line.inventoryItemId === 'object' ? line.inventoryItemId : null;
+    return {
+      _id: line._id,
+      inventoryItemId: item?._id || line.inventoryItemId,
+      itemCode: item?.itemCode || '',
+      itemName: item?.itemName || line.itemDescription || '',
+      itemDescription: line.itemDescription || item?.itemName || '',
+      quantity: line.quantity,
+      unitPriceAmount: roundMoney(line.unitPriceAmount),
+      discountAmount: roundMoney(line.discountAmount),
+      taxAmount: roundMoney(line.taxAmount),
+      lineTotalAmount: roundMoney(line.lineTotalAmount),
+    };
+  });
+
+  return {
+    _id: sale._id,
+    saleNumber: sale.saleNumber || sale.invoiceNumber,
+    invoiceNumber: sale.invoiceNumber,
+    customerId: customer?._id || sale.customerId,
+    customerName: customer?.customerName || '',
+    customerCode: customer?.customerCode || '',
+    invoiceDate: sale.invoiceDate,
+    saleType,
+    saleTypeLabel: SALE_TYPES.find((item) => item.value === saleType)?.label || saleType,
+    paymentTermDays: sale.paymentTermDays ?? customer?.paymentTermDays ?? 0,
+    lineItems,
+    itemCount: lineItems.length,
+    itemQuantity: itemQuantityOf(sale),
+    subtotalAmount: roundMoney(sale.subtotalAmount),
+    discountAmount: roundMoney(sale.discountAmount),
+    tradeDiscountAmount: roundMoney(sale.tradeDiscountAmount),
+    taxAmount: roundMoney(sale.taxAmount),
+    taxRate: GST_TAX_RATE,
+    totalAmount: roundMoney(sale.totalAmount),
+    paidAmount: roundMoney(sale.paidAmount),
+    returnedAmount: roundMoney(sale.returnedAmount),
+    outstandingAmount: roundMoney(sale.outstandingAmount),
+    paymentStatus: sale.paymentStatus,
+    paymentStatusLabel: paymentStatusLabel(sale.paymentStatus),
+    saleStatus: sale.saleStatus,
+    saleStatusLabel: saleStatusLabel(sale.saleStatus),
+    remarks: sale.remarks || '',
+    createdAt: sale.createdAt,
+    updatedAt: sale.updatedAt,
+  };
+}
+
+function todayRange() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { $gte: start, $lt: end };
+}
+
+function activeSaleMatch() {
+  return { saleStatus: { $nin: ['cancelled', 'draft'] } };
+}
+
+async function nextInvoiceNumber(session) {
+  const year = new Date().getFullYear();
+  return nextSequentialCode(Sale, 'invoiceNumber', `INV-${year}`, 4, session);
+}
+
+async function resolveReceiveAccount(accountId, session) {
+  if (accountId) {
+    return assertAccount(accountId, session);
+  }
+  const primary = await Account.findOne({
+    isPrimary: true,
+    isActive: true,
+    accountType: { $in: ['cash', 'bank'] },
+  }).session(session);
+  if (primary) return primary;
+  const cash = await Account.findOne({ isActive: true, accountType: 'cash' }).sort({ createdAt: 1 }).session(session);
+  if (cash) return cash;
+  throw new ApiError(400, 'No cash or bank account is configured to receive payment');
+}
+
+async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMethod, paymentDate, referenceNumber, userId }, session) {
+  const account = await resolveReceiveAccount(accountId, session);
+  await changeAccount(account._id, amount, session);
+  const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
+  await Payment.create(
+    [
+      {
+        paymentNumber,
+        paymentType: 'receive',
+        customerId,
+        saleId: sale._id,
+        accountId: account._id,
+        paymentAmount: amount,
+        paymentMethod: paymentMethod || 'cash',
+        paymentDate: paymentDate || sale.invoiceDate || new Date(),
+        referenceNumber: referenceNumber || '',
+        receivedOrPaidByUserId: userId,
+      },
+    ],
+    { session }
+  );
+  return account;
 }
 
 async function assertCreditLimit(customer, extraAmount, session, excludeSaleId) {
   if (!customer.creditLimitAmount) return;
-  const match = { customerId: customer._id, saleStatus: { $ne: 'cancelled' } };
+  const match = { customerId: customer._id, saleStatus: { $nin: ['cancelled', 'draft'] } };
   if (excludeSaleId) match._id = { $ne: excludeSaleId };
   const [row] = await Sale.aggregate([
     { $match: match },
@@ -245,7 +398,11 @@ async function applySalePayment(sale, paidDelta, session) {
 async function getSaleById(id) {
   const doc = await populateQuery(Sale.findById(id), SALE_POPULATE);
   if (!doc) throw new ApiError(404, 'Sale not found');
-  return doc;
+  const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  return {
+    ...toSaleItem(plain),
+    form: await getSaleFormOptions({ id }),
+  };
 }
 
 async function getReturnById(id) {
@@ -276,21 +433,151 @@ async function listDocs(Model, filter, populate, sort) {
   };
 }
 
-const listSales = listDocs(
-  Sale,
-  (query) => {
-    const filter = applyDateRange({}, 'invoiceDate', query);
-    if (query.customerId) filter.customerId = query.customerId;
-    if (query.paymentStatus) filter.paymentStatus = query.paymentStatus;
-    if (query.saleStatus) filter.saleStatus = query.saleStatus;
-    if (query.search) {
-      filter.$or = [{ invoiceNumber: { $regex: query.search, $options: 'i' } }, { remarks: { $regex: query.search, $options: 'i' } }];
-    }
-    return filter;
-  },
-  SALE_POPULATE,
-  { invoiceDate: -1, createdAt: -1 }
-);
+async function buildSaleListFilter(query) {
+  const filter = applyDateRange({}, 'invoiceDate', query);
+  if (query.customerId) filter.customerId = query.customerId;
+  if (query.paymentStatus) filter.paymentStatus = query.paymentStatus;
+  if (query.saleStatus) filter.saleStatus = query.saleStatus;
+  const saleType = query.saleType || query.type;
+  if (saleType) filter.saleType = saleType;
+
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    const customers = await Customer.find({
+      $or: [{ customerName: regex }, { customerCode: regex }],
+    }).select('_id');
+    filter.$or = [
+      { invoiceNumber: regex },
+      { saleNumber: regex },
+      { remarks: regex },
+      { customerId: { $in: customers.map((item) => item._id) } },
+    ];
+  }
+  return filter;
+}
+
+async function salesSummary() {
+  const todayMatch = { ...activeSaleMatch(), invoiceDate: todayRange() };
+  const [todayRows, pending] = await Promise.all([
+    Sale.aggregate([
+      { $match: todayMatch },
+      {
+        $addFields: {
+          resolvedType: {
+            $ifNull: [
+              '$saleType',
+              { $cond: [{ $gt: ['$outstandingAmount', 0] }, 'credit', 'cash'] },
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: '$resolvedType',
+          amount: { $sum: '$totalAmount' },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Sale.aggregate([
+      { $match: { ...activeSaleMatch(), outstandingAmount: { $gt: 0 } } },
+      { $group: { _id: null, amount: { $sum: '$outstandingAmount' } } },
+    ]),
+  ]);
+
+  const cash = todayRows.find((row) => row._id === 'cash') || { amount: 0, count: 0 };
+  const credit = todayRows.find((row) => row._id === 'credit') || { amount: 0, count: 0 };
+
+  return {
+    todaySalesAmount: roundMoney((cash.amount || 0) + (credit.amount || 0)),
+    todaySalesCount: (cash.count || 0) + (credit.count || 0),
+    cashSalesAmount: roundMoney(cash.amount),
+    cashSalesCount: cash.count || 0,
+    creditSalesAmount: roundMoney(credit.amount),
+    creditSalesCount: credit.count || 0,
+    pendingCreditAmount: roundMoney(pending[0]?.amount),
+  };
+}
+
+async function listSales(query) {
+  const { page, limit, skip } = parsePagination(query);
+  const filter = await buildSaleListFilter(query);
+  const findQuery = populateQuery(
+    Sale.find(filter).sort({ invoiceDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+    SALE_POPULATE
+  );
+  const [items, total, summary] = await Promise.all([
+    findQuery.lean(),
+    Sale.countDocuments(filter),
+    salesSummary(),
+  ]);
+
+  return {
+    ...paginated(items.map(toSaleItem), total, page, limit),
+    summary,
+    meta: {
+      saleTypes: SALE_TYPES,
+      paymentStatuses: PAYMENT_STATUS_OPTIONS,
+      saleStatuses: SALE_STATUS_OPTIONS,
+    },
+  };
+}
+
+async function getSaleFormOptions() {
+  const [nextSaleNumber, nextInvoice, customers, inventoryItems, accounts] = await Promise.all([
+    nextSequentialCode(Sale, 'saleNumber', 'SAL', 3),
+    nextInvoiceNumber(),
+    Customer.find({ isActive: true })
+      .select('customerCode customerName phoneNumber paymentTermDays creditLimitAmount')
+      .sort({ customerName: 1 })
+      .lean(),
+    InventoryItem.find({ isActive: true })
+      .populate('cylinderTypeId', 'sellingPricePerCylinder refillPriceAmount typeName typeCode capacityKg')
+      .select('itemCode itemName itemCategory unitOfMeasure currentQuantity unitSellingPriceAmount cylinderTypeId')
+      .sort({ itemName: 1 })
+      .lean(),
+    Account.find({ isActive: true, accountType: { $in: ['cash', 'bank'] } })
+      .select('accountCode accountName accountType isPrimary currentBalanceAmount')
+      .sort({ isPrimary: -1, accountName: 1 })
+      .lean(),
+  ]);
+
+  return {
+    nextSaleNumber,
+    nextInvoiceNumber: nextInvoice,
+    taxRate: GST_TAX_RATE,
+    taxRatePercent: Math.round(GST_TAX_RATE * 100),
+    paymentTerms: PAYMENT_TERMS,
+    saleTypes: SALE_TYPES,
+    customers: customers.map((customer) => ({
+      _id: customer._id,
+      customerCode: customer.customerCode,
+      customerName: customer.customerName,
+      phoneNumber: customer.phoneNumber || '',
+      paymentTermDays: customer.paymentTermDays || 0,
+      creditLimitAmount: customer.creditLimitAmount || 0,
+      label: `${customer.customerCode} – ${customer.customerName}`,
+    })),
+    inventoryItems: inventoryItems.map((item) => ({
+      _id: item._id,
+      itemCode: item.itemCode,
+      itemName: item.itemName,
+      itemCategory: item.itemCategory,
+      unitOfMeasure: item.unitOfMeasure,
+      currentQuantity: item.currentQuantity || 0,
+      unitPriceAmount: roundMoney(defaultUnitPrice(item)),
+      label: `${item.itemCode} – ${item.itemName}`,
+    })),
+    accounts: accounts.map((account) => ({
+      _id: account._id,
+      accountCode: account.accountCode,
+      accountName: account.accountName,
+      accountType: account.accountType,
+      isPrimary: Boolean(account.isPrimary),
+      label: `${account.accountCode} – ${account.accountName}`,
+    })),
+  };
+}
 
 const listReturns = listDocs(
   SalesReturn,
@@ -349,30 +636,47 @@ const listExpenses = listDocs(
 async function createSale(body, req) {
   const result = await withTransaction(async (session) => {
     const customer = await assertCustomer(body.customerId, session);
+    const isDraft = body.saveAsDraft === true;
     const lineItems = await buildSaleLines(body.lineItems, session);
-    const totals = totalsFromLines(lineItems);
-    await assertCreditLimit(customer, totals.totalAmount, session);
-
-    for (const line of lineItems) {
-      await changeStock(line.inventoryItemId, -line.quantity, session);
+    const totals = totalsFromLines(lineItems, body.tradeDiscountAmount);
+    const amountPaid = roundMoney(body.amountPaid ?? body.payment?.paymentAmount ?? 0);
+    if (amountPaid > totals.totalAmount) {
+      throw new ApiError(400, 'Amount paid cannot exceed sale total');
     }
 
-    let paidAmount = 0;
-    const balances = deriveBalances(totals.totalAmount, paidAmount, 0);
-    const invoiceNumber = await assignNumber(Sale, 'invoiceNumber', 'INV', body.invoiceNumber, session);
+    const balances = deriveBalances(totals.totalAmount, amountPaid, 0);
+    const saleType = balances.outstandingAmount > 0 ? 'credit' : 'cash';
+    if (!isDraft && balances.outstandingAmount > 0) {
+      await assertCreditLimit(customer, balances.outstandingAmount, session);
+    }
+
+    if (!isDraft) {
+      for (const line of lineItems) {
+        await changeStock(line.inventoryItemId, -line.quantity, session);
+      }
+    }
+
+    const saleNumber = await assignNumber(Sale, 'saleNumber', 'SAL', body.saleNumber, session);
+    const invoiceNumber = body.invoiceNumber
+      ? await assignNumber(Sale, 'invoiceNumber', 'INV', body.invoiceNumber, session)
+      : await nextInvoiceNumber(session);
+
     const [sale] = await Sale.create(
       [
         {
+          saleNumber,
           invoiceNumber,
           customerId: customer._id,
           invoiceDate: body.invoiceDate || new Date(),
+          saleType,
+          paymentTermDays: body.paymentTermDays ?? customer.paymentTermDays ?? 0,
           lineItems,
           ...totals,
-          paidAmount,
+          paidAmount: amountPaid,
           returnedAmount: 0,
           outstandingAmount: balances.outstandingAmount,
           paymentStatus: balances.paymentStatus,
-          saleStatus: 'confirmed',
+          saleStatus: isDraft ? 'draft' : 'confirmed',
           createdByUserId: req.user._id,
           remarks: body.remarks || '',
         },
@@ -380,30 +684,17 @@ async function createSale(body, req) {
       { session }
     );
 
-    if (body.payment) {
-      if (body.payment.paymentAmount > sale.totalAmount) {
-        throw new ApiError(400, 'Payment cannot exceed sale total');
-      }
-      await changeAccount(body.payment.accountId, body.payment.paymentAmount, session);
-      const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
-      await Payment.create(
-        [
-          {
-            paymentNumber,
-            paymentType: 'receive',
-            customerId: customer._id,
-            saleId: sale._id,
-            accountId: body.payment.accountId,
-            paymentAmount: body.payment.paymentAmount,
-            paymentMethod: body.payment.paymentMethod || 'cash',
-            paymentDate: body.invoiceDate || new Date(),
-            referenceNumber: body.payment.referenceNumber || '',
-            receivedOrPaidByUserId: req.user._id,
-          },
-        ],
-        { session }
-      );
-      await applySalePayment(sale, body.payment.paymentAmount, session);
+    if (!isDraft && amountPaid > 0) {
+      await postSaleReceipt({
+        sale,
+        customerId: customer._id,
+        amount: amountPaid,
+        accountId: body.accountId || body.payment?.accountId,
+        paymentMethod: body.payment?.paymentMethod || (saleType === 'cash' ? 'cash' : 'cash'),
+        paymentDate: body.invoiceDate,
+        referenceNumber: body.payment?.referenceNumber,
+        userId: req.user._id,
+      }, session);
     }
 
     await writeAudit({
@@ -413,7 +704,13 @@ async function createSale(body, req) {
       moduleName: 'sales',
       entityName: 'Sale',
       entityId: sale._id,
-      newValues: { invoiceNumber, totalAmount: sale.totalAmount, paidAmount: sale.paidAmount },
+      newValues: {
+        saleNumber,
+        invoiceNumber,
+        totalAmount: sale.totalAmount,
+        paidAmount: sale.paidAmount,
+        saleStatus: sale.saleStatus,
+      },
     });
 
     return sale._id;
@@ -428,18 +725,44 @@ async function updateSale(id, body, req) {
     const sale = await Sale.findById(id).session(session);
     if (!sale) throw new ApiError(404, 'Sale not found');
 
+    if (body.saleStatus === 'confirmed') {
+      if (sale.saleStatus !== 'draft') {
+        throw new ApiError(400, 'Only a draft sale can be confirmed');
+      }
+      const customer = await assertCustomer(sale.customerId, session);
+      if (sale.outstandingAmount > 0) {
+        await assertCreditLimit(customer, sale.outstandingAmount, session, sale._id);
+      }
+      for (const line of sale.lineItems) {
+        await changeStock(line.inventoryItemId, -line.quantity, session);
+      }
+      if (sale.paidAmount > 0) {
+        await postSaleReceipt({
+          sale,
+          customerId: customer._id,
+          amount: sale.paidAmount,
+          accountId: body.accountId,
+          paymentDate: sale.invoiceDate,
+          userId: req.user._id,
+        }, session);
+      }
+      sale.saleStatus = 'confirmed';
+    }
+
     if (body.saleStatus === 'cancelled') {
       if (sale.saleStatus === 'cancelled') {
         throw new ApiError(400, 'Sale is already cancelled');
       }
-      if (sale.paidAmount > 0) {
+      if (sale.paidAmount > 0 && sale.saleStatus !== 'draft') {
         throw new ApiError(400, 'Cannot cancel a sale that has payments');
       }
       if (sale.returnedAmount > 0) {
         throw new ApiError(400, 'Cannot cancel a sale that has returns');
       }
-      for (const line of sale.lineItems) {
-        await changeStock(line.inventoryItemId, line.quantity, session);
+      if (sale.saleStatus !== 'draft') {
+        for (const line of sale.lineItems) {
+          await changeStock(line.inventoryItemId, line.quantity, session);
+        }
       }
       sale.saleStatus = 'cancelled';
       sale.outstandingAmount = 0;
@@ -491,8 +814,8 @@ async function createReturn(body, req) {
   const result = await withTransaction(async (session) => {
     const sale = await Sale.findById(body.originalSaleId).session(session);
     if (!sale) throw new ApiError(400, 'Original sale not found');
-    if (sale.saleStatus === 'cancelled') {
-      throw new ApiError(400, 'Cannot return a cancelled sale');
+    if (sale.saleStatus === 'cancelled' || sale.saleStatus === 'draft') {
+      throw new ApiError(400, 'Cannot return a cancelled or draft sale');
     }
     const customerId = body.customerId || sale.customerId;
     if (String(customerId) !== String(sale.customerId)) {
@@ -745,7 +1068,13 @@ async function removeExpense(id, req) {
   invalidateFinance();
 }
 
-const sale = { create: createSale, list: listSales, getById: getSaleById, update: updateSale };
+const sale = {
+  create: createSale,
+  list: listSales,
+  getById: getSaleById,
+  update: updateSale,
+  getFormOptions: getSaleFormOptions,
+};
 const salesReturn = { create: createReturn, list: listReturns, getById: getReturnById };
 const payment = { create: createPayment, list: listPayments, getById: getPaymentById };
 const expense = {

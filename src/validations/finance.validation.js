@@ -7,7 +7,20 @@ const {
   listMasterQuery,
   atLeastOneField,
 } = require('./common.validation');
-const { PAYMENT_TYPES, PAYMENT_METHODS, SALE_STATUSES } = require('../constants/masters');
+const {
+  PAYMENT_TYPES,
+  PAYMENT_METHODS,
+  SALE_STATUSES,
+  SALE_TYPE_VALUES,
+  PAYMENT_TERM_DAYS,
+} = require('../constants/masters');
+
+const paymentTermDays = z.coerce
+  .number()
+  .int()
+  .refine((value) => PAYMENT_TERM_DAYS.includes(value), {
+    message: 'Invalid payment terms',
+  });
 
 const optionalDate = z.coerce.date().optional();
 const optionalCode = code.optional();
@@ -20,7 +33,6 @@ const saleLine = z.object({
   quantity: positiveQty,
   unitPriceAmount: nonNegative.optional(),
   discountAmount: nonNegative.optional(),
-  taxAmount: nonNegative.optional(),
 });
 
 const salePayment = z.object({
@@ -34,10 +46,16 @@ const sale = {
   create: z.object({
     body: z.object({
       invoiceNumber: optionalCode,
+      saleNumber: optionalCode,
       customerId: objectId,
-      invoiceDate: optionalDate,
+      invoiceDate: z.coerce.date(),
+      paymentTermDays: paymentTermDays.optional(),
       lineItems: z.array(saleLine).min(1),
+      tradeDiscountAmount: nonNegative.optional(),
+      amountPaid: nonNegative.optional(),
+      accountId: objectId.optional(),
       remarks: z.string().trim().max(500).optional(),
+      saveAsDraft: z.boolean().optional(),
       payment: salePayment.optional(),
     }),
   }),
@@ -46,7 +64,8 @@ const sale = {
     body: atLeastOneField(
       z.object({
         remarks: z.string().trim().max(500).optional(),
-        saleStatus: z.enum(['cancelled']).optional(),
+        saleStatus: z.enum(['cancelled', 'confirmed']).optional(),
+        accountId: objectId.optional(),
       })
     ),
   }),
@@ -54,6 +73,8 @@ const sale = {
     customerId: objectId.optional(),
     paymentStatus: z.string().optional(),
     saleStatus: z.enum(SALE_STATUSES).optional(),
+    saleType: z.enum(SALE_TYPE_VALUES).optional(),
+    type: z.enum(SALE_TYPE_VALUES).optional(),
     startDate: z.coerce.date().optional(),
     endDate: z.coerce.date().optional(),
   }),

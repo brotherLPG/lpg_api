@@ -20,6 +20,12 @@ const saleLineSchema = new mongoose.Schema(
 
 const saleSchema = new mongoose.Schema(
   {
+    saleNumber: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
     invoiceNumber: {
       type: String,
       required: [true, 'invoiceNumber is required'],
@@ -35,6 +41,13 @@ const saleSchema = new mongoose.Schema(
       type: Date,
       required: [true, 'invoiceDate is required'],
     },
+    saleType: {
+      type: String,
+      enum: ['cash', 'credit'],
+      default: 'credit',
+    },
+    paymentTermDays: { type: Number, min: 0, default: 0 },
+    tradeDiscountAmount: { type: Number, min: 0, default: 0 },
     lineItems: {
       type: [saleLineSchema],
       required: true,
@@ -69,5 +82,6 @@ const saleSchema = new mongoose.Schema(
 
 saleSchema.index({ customerId: 1, invoiceDate: -1 });
 saleSchema.index({ paymentStatus: 1, saleStatus: 1 });
+saleSchema.index({ saleType: 1, invoiceDate: -1 });
 
 module.exports = mongoose.model('Sale', saleSchema);

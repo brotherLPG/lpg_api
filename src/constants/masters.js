@@ -46,8 +46,27 @@ const STOCK_STATUSES = [
   { value: 'out-of-stock', label: 'Out of Stock' },
 ];
 const STOCK_STATUS_VALUES = STOCK_STATUSES.map((item) => item.value);
-const SALE_STATUSES = ['confirmed', 'partially-returned', 'returned', 'cancelled'];
+const SALE_STATUSES = ['draft', 'confirmed', 'partially-returned', 'returned', 'cancelled'];
+const SALE_TYPES = [
+  { value: 'cash', label: 'Cash' },
+  { value: 'credit', label: 'Credit' },
+];
+const SALE_TYPE_VALUES = SALE_TYPES.map((item) => item.value);
+const GST_TAX_RATE = 0.17;
 const PAYMENT_STATUSES = ['unpaid', 'partial', 'paid', 'refund-due'];
+const PAYMENT_STATUS_OPTIONS = [
+  { value: 'unpaid', label: 'Unpaid' },
+  { value: 'partial', label: 'Partial' },
+  { value: 'paid', label: 'Paid' },
+  { value: 'refund-due', label: 'Refund Due' },
+];
+const SALE_STATUS_OPTIONS = [
+  { value: 'draft', label: 'Draft' },
+  { value: 'confirmed', label: 'Confirmed' },
+  { value: 'partially-returned', label: 'Partially Returned' },
+  { value: 'returned', label: 'Returned' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
 const PAYMENT_TYPES = ['receive', 'pay', 'refund'];
 const PAYMENT_METHODS = ['cash', 'bank', 'cheque', 'online'];
 const ASSET_CATEGORIES = ['plant', 'vehicle', 'filling-machine', 'compressor', 'tank', 'building', 'furniture', 'other'];
@@ -127,7 +146,12 @@ module.exports = {
   STOCK_STATUSES,
   STOCK_STATUS_VALUES,
   SALE_STATUSES,
+  SALE_TYPES,
+  SALE_TYPE_VALUES,
+  SALE_STATUS_OPTIONS,
+  GST_TAX_RATE,
   PAYMENT_STATUSES,
+  PAYMENT_STATUS_OPTIONS,
   PAYMENT_TYPES,
   PAYMENT_METHODS,
   ASSET_CATEGORIES,
