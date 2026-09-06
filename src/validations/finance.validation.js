@@ -13,6 +13,7 @@ const {
   SALE_STATUSES,
   SALE_TYPE_VALUES,
   PAYMENT_TERM_DAYS,
+  RETURN_REASON_VALUES,
 } = require('../constants/masters');
 
 const paymentTermDays = z.coerce
@@ -85,16 +86,26 @@ const salesReturn = {
   create: z.object({
     body: z.object({
       returnNumber: optionalCode,
-      originalSaleId: objectId,
+      originalSaleId: objectId.optional(),
+      originalInvoiceNumber: z.string().trim().min(1).max(40).optional(),
       customerId: objectId.optional(),
-      returnDate: optionalDate,
-      returnReason: z.string().trim().max(300).optional(),
+      returnDate: z.coerce.date(),
+      returnReason: z.enum(RETURN_REASON_VALUES),
+      inspectionNotes: z.string().trim().max(1000).optional(),
       returnItems: z.array(
         z.object({
           inventoryItemId: objectId,
           quantity: positiveQty,
         })
       ).min(1),
+    }).superRefine((data, ctx) => {
+      if (!data.originalSaleId && !data.originalInvoiceNumber) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'originalSaleId or originalInvoiceNumber is required',
+          path: ['originalInvoiceNumber'],
+        });
+      }
     }),
   }),
   list: listMasterQuery({

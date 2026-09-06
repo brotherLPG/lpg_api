@@ -21,6 +21,8 @@ const {
   SALE_STATUS_OPTIONS,
   PAYMENT_STATUS_OPTIONS,
   GST_TAX_RATE,
+  RETURN_REASONS,
+  RETURN_ACTION_TYPE,
 } = require('../constants/masters');
 
 const SALE_POPULATE = [
@@ -408,7 +410,11 @@ async function getSaleById(id) {
 async function getReturnById(id) {
   const doc = await populateQuery(SalesReturn.findById(id), RETURN_POPULATE);
   if (!doc) throw new ApiError(404, 'SalesReturn not found');
-  return doc;
+  const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  return {
+    ...toReturnItem(plain),
+    form: await getReturnFormOptions(),
+  };
 }
 
 async function getPaymentById(id) {
@@ -579,20 +585,212 @@ async function getSaleFormOptions() {
   };
 }
 
-const listReturns = listDocs(
-  SalesReturn,
-  (query) => {
-    const filter = applyDateRange({}, 'returnDate', query);
-    if (query.customerId) filter.customerId = query.customerId;
-    if (query.originalSaleId) filter.originalSaleId = query.originalSaleId;
-    if (query.search) {
-      filter.$or = [{ returnNumber: { $regex: query.search, $options: 'i' } }, { returnReason: { $regex: query.search, $options: 'i' } }];
+async function nextReturnNumber(session) {
+  const year = new Date().getFullYear();
+  return nextSequentialCode(SalesReturn, 'returnNumber', `RET-${year}`, 4, session);
+}
+
+function returnReasonLabel(value) {
+  return RETURN_REASONS.find((item) => item.value === value)?.label || value || '';
+}
+
+function toReturnItem(doc) {
+  const customer = doc.customerId && typeof doc.customerId === 'object' ? doc.customerId : null;
+  const sale = doc.originalSaleId && typeof doc.originalSaleId === 'object' ? doc.originalSaleId : null;
+  const returnItems = (doc.returnItems || []).map((line) => {
+    const item = line.inventoryItemId && typeof line.inventoryItemId === 'object' ? line.inventoryItemId : null;
+    return {
+      _id: line._id,
+      inventoryItemId: item?._id || line.inventoryItemId,
+      itemCode: item?.itemCode || '',
+      itemName: item?.itemName || '',
+      quantity: line.quantity,
+      unitPriceAmount: roundMoney(line.unitPriceAmount),
+      lineTotalAmount: roundMoney(line.lineTotalAmount),
+    };
+  });
+
+  return {
+    _id: doc._id,
+    returnNumber: doc.returnNumber,
+    customerId: customer?._id || doc.customerId,
+    customerName: customer?.customerName || '',
+    customerCode: customer?.customerCode || '',
+    originalSaleId: sale?._id || doc.originalSaleId,
+    originalInvoiceNumber: sale?.invoiceNumber || '',
+    returnDate: doc.returnDate,
+    returnReason: doc.returnReason || '',
+    returnReasonLabel: returnReasonLabel(doc.returnReason),
+    inspectionNotes: doc.inspectionNotes || '',
+    adjustmentType: doc.adjustmentType || RETURN_ACTION_TYPE.value,
+    adjustmentTypeLabel: RETURN_ACTION_TYPE.label,
+    returnItems,
+    itemCount: returnItems.length,
+    itemQuantity: returnItems.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0),
+    totalReturnAmount: roundMoney(doc.totalReturnAmount),
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+async function findOriginalSale({ originalSaleId, originalInvoiceNumber }, session) {
+  let query = null;
+  if (originalSaleId) {
+    query = Sale.findById(originalSaleId);
+  } else if (originalInvoiceNumber) {
+    query = Sale.findOne({
+      invoiceNumber: { $regex: `^${String(originalInvoiceNumber).trim()}$`, $options: 'i' },
+    });
+  }
+  if (query && session) query = query.session(session);
+  const sale = query ? await query : null;
+  if (!sale) throw new ApiError(400, 'Original sale invoice not found');
+  if (sale.saleStatus === 'cancelled' || sale.saleStatus === 'draft') {
+    throw new ApiError(400, 'Cannot return a cancelled or draft sale');
+  }
+  return sale;
+}
+
+async function originalSalePreview(sale) {
+  await sale.populate([
+    { path: 'customerId', select: 'customerCode customerName phoneNumber' },
+    { path: 'lineItems.inventoryItemId', select: 'itemCode itemName itemCategory unitOfMeasure' },
+  ]);
+  const already = await returnedQtyByItem(sale._id);
+  const customer = sale.customerId && sale.customerId.customerName ? sale.customerId : null;
+  const lineItems = (sale.lineItems || []).map((line) => {
+    const item = line.inventoryItemId && line.inventoryItemId.itemName ? line.inventoryItemId : null;
+    const originalQuantity = line.quantity;
+    const alreadyReturnedQuantity = already.get(String(item?._id || line.inventoryItemId)) || 0;
+    const remainingQuantity = roundMoney(originalQuantity - alreadyReturnedQuantity);
+    return {
+      inventoryItemId: item?._id || line.inventoryItemId,
+      itemCode: item?.itemCode || '',
+      itemName: item?.itemName || line.itemDescription || '',
+      originalQuantity,
+      alreadyReturnedQuantity,
+      remainingQuantity,
+      unitPriceAmount: roundMoney(line.unitPriceAmount),
+      originalLineTotalAmount: roundMoney(line.lineTotalAmount),
+    };
+  });
+
+  return {
+    _id: sale._id,
+    saleNumber: sale.saleNumber || sale.invoiceNumber,
+    invoiceNumber: sale.invoiceNumber,
+    invoiceDate: sale.invoiceDate,
+    customerId: customer?._id || sale.customerId,
+    customerName: customer?.customerName || '',
+    customerCode: customer?.customerCode || '',
+    totalAmount: roundMoney(sale.totalAmount),
+    paidAmount: roundMoney(sale.paidAmount),
+    outstandingAmount: roundMoney(sale.outstandingAmount),
+    itemCount: lineItems.length,
+    lineItems,
+  };
+}
+
+async function listReturns(query) {
+  const { page, limit, skip } = parsePagination(query);
+  const filter = applyDateRange({}, 'returnDate', query);
+  if (query.customerId) filter.customerId = query.customerId;
+  if (query.originalSaleId) filter.originalSaleId = query.originalSaleId;
+
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    const [customers, sales] = await Promise.all([
+      Customer.find({ $or: [{ customerName: regex }, { customerCode: regex }] }).select('_id'),
+      Sale.find({ invoiceNumber: regex }).select('_id'),
+    ]);
+    filter.$or = [
+      { returnNumber: regex },
+      { returnReason: regex },
+      { inspectionNotes: regex },
+      { customerId: { $in: customers.map((item) => item._id) } },
+      { originalSaleId: { $in: sales.map((item) => item._id) } },
+    ];
+  }
+
+  const findQuery = populateQuery(
+    SalesReturn.find(filter).sort({ returnDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+    RETURN_POPULATE
+  );
+  const [items, total] = await Promise.all([
+    findQuery.lean(),
+    SalesReturn.countDocuments(filter),
+  ]);
+
+  return {
+    ...paginated(items.map(toReturnItem), total, page, limit),
+    meta: {
+      returnReasons: RETURN_REASONS,
+      actionType: RETURN_ACTION_TYPE,
+    },
+  };
+}
+
+async function getReturnFormOptions(query = {}) {
+  const customerFilter = { isActive: true };
+  const [nextNumber, customers] = await Promise.all([
+    nextReturnNumber(),
+    Customer.find(customerFilter)
+      .select('customerCode customerName phoneNumber')
+      .sort({ customerName: 1 })
+      .lean(),
+  ]);
+
+  const invoiceFilter = { saleStatus: { $nin: ['draft', 'cancelled'] } };
+  if (query.customerId) invoiceFilter.customerId = query.customerId;
+
+  const invoices = query.customerId
+    ? await Sale.find(invoiceFilter)
+      .populate('customerId', 'customerCode customerName')
+      .select('invoiceNumber saleNumber invoiceDate totalAmount customerId saleStatus')
+      .sort({ invoiceDate: -1 })
+      .limit(50)
+      .lean()
+    : [];
+
+  let originalSale = null;
+  let invoiceError = null;
+  if (query.invoiceNumber || query.originalSaleId) {
+    try {
+      const sale = await findOriginalSale({
+        originalSaleId: query.originalSaleId,
+        originalInvoiceNumber: query.invoiceNumber,
+      });
+      originalSale = await originalSalePreview(sale);
+    } catch (error) {
+      invoiceError = error.message || 'Original sale invoice not found';
     }
-    return filter;
-  },
-  RETURN_POPULATE,
-  { returnDate: -1, createdAt: -1 }
-);
+  }
+
+  return {
+    nextReturnNumber: nextNumber,
+    returnReasons: RETURN_REASONS,
+    actionType: RETURN_ACTION_TYPE,
+    customers: customers.map((customer) => ({
+      _id: customer._id,
+      customerCode: customer.customerCode,
+      customerName: customer.customerName,
+      phoneNumber: customer.phoneNumber || '',
+      label: `${customer.customerCode} – ${customer.customerName}`,
+    })),
+    invoices: invoices.map((sale) => ({
+      _id: sale._id,
+      invoiceNumber: sale.invoiceNumber,
+      saleNumber: sale.saleNumber || sale.invoiceNumber,
+      invoiceDate: sale.invoiceDate,
+      totalAmount: roundMoney(sale.totalAmount),
+      customerId: sale.customerId?._id || sale.customerId,
+      customerName: sale.customerId?.customerName || '',
+      label: `${sale.invoiceNumber} – ${sale.customerId?.customerName || ''}`.trim(),
+    })),
+    originalSale,
+    invoiceError,
+  };
+}
 
 const listPayments = listDocs(
   Payment,
@@ -812,11 +1010,10 @@ async function returnedQtyByItem(saleId, session) {
 
 async function createReturn(body, req) {
   const result = await withTransaction(async (session) => {
-    const sale = await Sale.findById(body.originalSaleId).session(session);
-    if (!sale) throw new ApiError(400, 'Original sale not found');
-    if (sale.saleStatus === 'cancelled' || sale.saleStatus === 'draft') {
-      throw new ApiError(400, 'Cannot return a cancelled or draft sale');
-    }
+    const sale = await findOriginalSale({
+      originalSaleId: body.originalSaleId,
+      originalInvoiceNumber: body.originalInvoiceNumber,
+    }, session);
     const customerId = body.customerId || sale.customerId;
     if (String(customerId) !== String(sale.customerId)) {
       throw new ApiError(400, 'customerId does not match the original sale');
@@ -828,14 +1025,18 @@ async function createReturn(body, req) {
     const returnItems = [];
 
     for (const raw of body.returnItems) {
+      if (!raw.quantity) continue;
       const key = String(raw.inventoryItemId);
       const soldQty = sold.get(key) || 0;
       const returnedQty = already.get(key) || 0;
-      if (raw.quantity > soldQty - returnedQty) {
-        throw new ApiError(400, 'Return quantity exceeds sold quantity for an item');
-      }
       const saleLine = sale.lineItems.find((line) => String(line.inventoryItemId) === key);
-      const unitPriceAmount = saleLine?.unitPriceAmount || 0;
+      if (!saleLine) {
+        throw new ApiError(400, 'Return item was not on the original invoice');
+      }
+      if (raw.quantity > soldQty - returnedQty) {
+        throw new ApiError(400, 'Return quantity exceeds remaining quantity for an item');
+      }
+      const unitPriceAmount = saleLine.unitPriceAmount || 0;
       returnItems.push({
         inventoryItemId: raw.inventoryItemId,
         quantity: raw.quantity,
@@ -845,18 +1046,26 @@ async function createReturn(body, req) {
       await changeStock(raw.inventoryItemId, raw.quantity, session);
     }
 
+    if (!returnItems.length) {
+      throw new ApiError(400, 'At least one return item is required');
+    }
+
     const totalReturnAmount = roundMoney(returnItems.reduce((sum, line) => sum + line.lineTotalAmount, 0));
-    const returnNumber = await assignNumber(SalesReturn, 'returnNumber', 'RTN', body.returnNumber, session);
+    const returnNumber = body.returnNumber
+      ? await assignNumber(SalesReturn, 'returnNumber', 'RET', body.returnNumber, session)
+      : await nextReturnNumber(session);
     const [doc] = await SalesReturn.create(
       [
         {
           returnNumber,
           customerId,
           originalSaleId: sale._id,
-          returnDate: body.returnDate || new Date(),
+          returnDate: body.returnDate,
           returnItems,
           totalReturnAmount,
-          returnReason: body.returnReason || '',
+          returnReason: body.returnReason,
+          inspectionNotes: body.inspectionNotes || '',
+          adjustmentType: RETURN_ACTION_TYPE.value,
           processedByUserId: req.user._id,
         },
       ],
@@ -1075,7 +1284,12 @@ const sale = {
   update: updateSale,
   getFormOptions: getSaleFormOptions,
 };
-const salesReturn = { create: createReturn, list: listReturns, getById: getReturnById };
+const salesReturn = {
+  create: createReturn,
+  list: listReturns,
+  getById: getReturnById,
+  getFormOptions: getReturnFormOptions,
+};
 const payment = { create: createPayment, list: listPayments, getById: getPaymentById };
 const expense = {
   create: createExpense,

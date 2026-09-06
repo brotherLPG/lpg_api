@@ -43,6 +43,11 @@ const salesReturnSchema = new mongoose.Schema(
     },
     totalReturnAmount: { type: Number, required: true, min: 0 },
     returnReason: { type: String, trim: true, default: '' },
+    inspectionNotes: { type: String, trim: true, default: '' },
+    adjustmentType: {
+      type: String,
+      default: 'credit-customer-ledger',
+    },
     processedByUserId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

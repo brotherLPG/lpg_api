@@ -53,6 +53,20 @@ const SALE_TYPES = [
 ];
 const SALE_TYPE_VALUES = SALE_TYPES.map((item) => item.value);
 const GST_TAX_RATE = 0.17;
+const RETURN_REASONS = [
+  { value: 'defective-valve', label: 'Defective Cylinder (Valves Leaking)' },
+  { value: 'defective-cylinder', label: 'Defective Cylinder' },
+  { value: 'damaged-in-transit', label: 'Damaged in Transit' },
+  { value: 'wrong-item', label: 'Wrong Item Supplied' },
+  { value: 'over-supplied', label: 'Over Supplied' },
+  { value: 'customer-request', label: 'Customer Request' },
+  { value: 'other', label: 'Other' },
+];
+const RETURN_REASON_VALUES = RETURN_REASONS.map((item) => item.value);
+const RETURN_ACTION_TYPE = {
+  value: 'credit-customer-ledger',
+  label: 'Credit to Customer Ledger Account',
+};
 const PAYMENT_STATUSES = ['unpaid', 'partial', 'paid', 'refund-due'];
 const PAYMENT_STATUS_OPTIONS = [
   { value: 'unpaid', label: 'Unpaid' },
@@ -150,6 +164,9 @@ module.exports = {
   SALE_TYPE_VALUES,
   SALE_STATUS_OPTIONS,
   GST_TAX_RATE,
+  RETURN_REASONS,
+  RETURN_REASON_VALUES,
+  RETURN_ACTION_TYPE,
   PAYMENT_STATUSES,
   PAYMENT_STATUS_OPTIONS,
   PAYMENT_TYPES,
