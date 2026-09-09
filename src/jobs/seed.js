@@ -117,6 +117,7 @@ async function seedMasters() {
     { categoryCode: 'MAINT', categoryName: 'Maintenance', description: 'Plant and equipment maintenance' },
     { categoryCode: 'SALARY', categoryName: 'Salary', description: 'Staff salaries' },
     { categoryCode: 'UTIL', categoryName: 'Utilities', description: 'Electricity, water and other utilities' },
+    { categoryCode: 'OFFICE', categoryName: 'Office Supplies', description: 'Stationery and office supplies' },
     { categoryCode: 'OTHER', categoryName: 'Other', description: 'Miscellaneous expenses' },
   ];
 

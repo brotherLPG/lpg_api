@@ -36,7 +36,15 @@ const expenseSchema = new mongoose.Schema(
     paidFromAccountId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Account',
-      required: [true, 'paidFromAccountId is required'],
+      default: null,
+    },
+    vendorPayeeName: { type: String, trim: true, default: '' },
+    referenceNumber: { type: String, trim: true, default: '' },
+    paymentDate: { type: Date, default: null },
+    expenseStatus: {
+      type: String,
+      enum: ['paid', 'pending'],
+      default: 'paid',
     },
     approvedByUserId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -55,5 +63,6 @@ const expenseSchema = new mongoose.Schema(
 
 expenseSchema.index({ expenseCategoryId: 1, expenseDate: -1 });
 expenseSchema.index({ paidFromAccountId: 1, expenseDate: -1 });
+expenseSchema.index({ expenseStatus: 1, expenseDate: -1 });
 
 module.exports = mongoose.model('Expense', expenseSchema);

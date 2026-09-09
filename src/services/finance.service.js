@@ -28,6 +28,7 @@ const {
   PAYMENT_DIRECTIONS,
   PAYMENT_DIRECTION_OPTIONS,
   PAYMENT_VOUCHER_STATUSES,
+  EXPENSE_STATUSES,
 } = require('../constants/masters');
 
 const SALE_POPULATE = [
@@ -441,7 +442,11 @@ async function getPaymentById(id) {
 async function getExpenseById(id) {
   const doc = await populateQuery(Expense.findById(id), EXPENSE_POPULATE);
   if (!doc) throw new ApiError(404, 'Expense not found');
-  return doc;
+  const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  return {
+    ...toExpenseItem(plain),
+    form: await getExpenseFormOptions(),
+  };
 }
 
 async function listDocs(Model, filter, populate, sort) {
@@ -1148,23 +1153,186 @@ async function getPaymentFormOptions(query = {}) {
   };
 }
 
-const listExpenses = listDocs(
-  Expense,
-  (query) => {
-    const filter = applyDateRange({}, 'expenseDate', query);
-    if (query.expenseCategoryId) filter.expenseCategoryId = query.expenseCategoryId;
-    if (query.paidFromAccountId) filter.paidFromAccountId = query.paidFromAccountId;
-    if (query.search) {
-      filter.$or = [
-        { expenseNumber: { $regex: query.search, $options: 'i' } },
-        { expenseDescription: { $regex: query.search, $options: 'i' } },
-      ];
-    }
-    return filter;
-  },
-  EXPENSE_POPULATE,
-  { expenseDate: -1, createdAt: -1 }
-);
+function resolveExpenseStatus(body, fallback = 'paid') {
+  if (body.expenseStatus) return body.expenseStatus;
+  if (body.isApproved === false) return 'pending';
+  if (body.isApproved === true) return 'paid';
+  return fallback;
+}
+
+function expenseStatusLabel(value) {
+  return EXPENSE_STATUSES.find((item) => item.value === value)?.label || titleCaseExpense(value);
+}
+
+function titleCaseExpense(value) {
+  return String(value || '')
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function toExpenseItem(doc) {
+  const category = doc.expenseCategoryId && typeof doc.expenseCategoryId === 'object' ? doc.expenseCategoryId : null;
+  const account = doc.paidFromAccountId && typeof doc.paidFromAccountId === 'object' ? doc.paidFromAccountId : null;
+  const approvedBy = doc.approvedByUserId && typeof doc.approvedByUserId === 'object' ? doc.approvedByUserId : null;
+  const recordedBy = doc.recordedByUserId && typeof doc.recordedByUserId === 'object' ? doc.recordedByUserId : null;
+  const expenseStatus = doc.expenseStatus || 'paid';
+
+  return {
+    _id: doc._id,
+    expenseNumber: doc.expenseNumber,
+    expenseDate: doc.expenseDate,
+    expenseCategoryId: category?._id || doc.expenseCategoryId || null,
+    categoryName: category?.categoryName || '',
+    categoryCode: category?.categoryCode || '',
+    expenseDescription: doc.expenseDescription || '',
+    vendorPayeeName: doc.vendorPayeeName || '',
+    expenseAmount: roundMoney(doc.expenseAmount),
+    paymentMethod: doc.paymentMethod,
+    paymentMethodLabel: PAYMENT_METHOD_OPTIONS.find((item) => item.value === doc.paymentMethod)?.label || doc.paymentMethod,
+    paidFromAccountId: account?._id || doc.paidFromAccountId || null,
+    paidFromAccountName: account ? `${account.accountCode} – ${account.accountName}` : '',
+    referenceNumber: doc.referenceNumber || '',
+    paymentDate: doc.paymentDate || null,
+    expenseStatus,
+    expenseStatusLabel: expenseStatusLabel(expenseStatus),
+    isApproved: expenseStatus === 'paid',
+    approvedByUserId: approvedBy?._id || doc.approvedByUserId || null,
+    approvedByName: expenseStatus === 'paid' ? (approvedBy?.fullName || '') : '',
+    recordedByUserId: recordedBy?._id || doc.recordedByUserId || null,
+    recordedByName: recordedBy?.fullName || '',
+    remarks: doc.remarks || '',
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+function currentMonthRange() {
+  const start = new Date();
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setMonth(end.getMonth() + 1);
+  return { $gte: start, $lt: end };
+}
+
+async function nextExpenseNumber(session) {
+  return nextSequentialCode(Expense, 'expenseNumber', 'EXP', 4, session);
+}
+
+async function expenseSummary() {
+  const monthMatch = { expenseDate: currentMonthRange() };
+  const [totals, byCategory] = await Promise.all([
+    Expense.aggregate([
+      { $match: monthMatch },
+      { $group: { _id: null, amount: { $sum: '$expenseAmount' }, count: { $sum: 1 } } },
+    ]),
+    Expense.aggregate([
+      { $match: monthMatch },
+      { $group: { _id: '$expenseCategoryId', amount: { $sum: '$expenseAmount' }, count: { $sum: 1 } } },
+      { $sort: { amount: -1 } },
+    ]),
+  ]);
+
+  const categoryIds = byCategory.map((row) => row._id).filter(Boolean);
+  const categories = await ExpenseCategory.find({ _id: { $in: categoryIds } })
+    .select('categoryCode categoryName')
+    .lean();
+  const categoryMap = new Map(categories.map((item) => [String(item._id), item]));
+
+  return {
+    thisMonthTotalAmount: roundMoney(totals[0]?.amount),
+    thisMonthCount: totals[0]?.count || 0,
+    categoryCards: byCategory.map((row) => {
+      const category = categoryMap.get(String(row._id));
+      return {
+        expenseCategoryId: row._id,
+        categoryCode: category?.categoryCode || '',
+        categoryName: category?.categoryName || 'Other',
+        amount: roundMoney(row.amount),
+        count: row.count || 0,
+      };
+    }),
+  };
+}
+
+async function listExpenses(query) {
+  const { page, limit, skip } = parsePagination(query);
+  const filter = applyDateRange({}, 'expenseDate', query);
+  if (query.expenseCategoryId) filter.expenseCategoryId = query.expenseCategoryId;
+  if (query.paidFromAccountId) filter.paidFromAccountId = query.paidFromAccountId;
+  const expenseStatus = query.expenseStatus || query.status;
+  if (expenseStatus) filter.expenseStatus = expenseStatus;
+
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    filter.$or = [
+      { expenseNumber: regex },
+      { expenseDescription: regex },
+      { vendorPayeeName: regex },
+      { referenceNumber: regex },
+      { remarks: regex },
+    ];
+  }
+
+  const findQuery = populateQuery(
+    Expense.find(filter).sort({ expenseDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+    EXPENSE_POPULATE
+  );
+  const [items, total, summary, categories] = await Promise.all([
+    findQuery.lean(),
+    Expense.countDocuments(filter),
+    expenseSummary(),
+    ExpenseCategory.find({ isActive: true }).select('categoryCode categoryName').sort({ categoryName: 1 }).lean(),
+  ]);
+
+  return {
+    ...paginated(items.map(toExpenseItem), total, page, limit),
+    summary,
+    meta: {
+      statuses: EXPENSE_STATUSES,
+      paymentMethods: PAYMENT_METHOD_OPTIONS,
+      categories: categories.map((category) => ({
+        _id: category._id,
+        categoryCode: category.categoryCode,
+        categoryName: category.categoryName,
+        label: category.categoryName,
+      })),
+    },
+  };
+}
+
+async function getExpenseFormOptions() {
+  const [nextNumber, categories, accounts] = await Promise.all([
+    nextExpenseNumber(),
+    ExpenseCategory.find({ isActive: true }).select('categoryCode categoryName').sort({ categoryName: 1 }).lean(),
+    Account.find({ isActive: true, accountType: { $in: ['cash', 'bank'] } })
+      .select('accountCode accountName accountType isPrimary currentBalanceAmount')
+      .sort({ isPrimary: -1, accountName: 1 })
+      .lean(),
+  ]);
+
+  return {
+    nextExpenseNumber: nextNumber,
+    statuses: EXPENSE_STATUSES,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
+    categories: categories.map((category) => ({
+      _id: category._id,
+      categoryCode: category.categoryCode,
+      categoryName: category.categoryName,
+      label: category.categoryName,
+    })),
+    accounts: accounts.map((account) => ({
+      _id: account._id,
+      accountCode: account.accountCode,
+      accountName: account.accountName,
+      accountType: account.accountType,
+      isPrimary: Boolean(account.isPrimary),
+      label: `${account.accountCode} – ${account.accountName}`,
+    })),
+  };
+}
 
 async function createSale(body, req) {
   const result = await withTransaction(async (session) => {
@@ -1626,21 +1794,39 @@ async function removePayment(id, req) {
 async function createExpense(body, req) {
   const result = await withTransaction(async (session) => {
     await assertCategory(body.expenseCategoryId, session);
-    await changeAccount(body.paidFromAccountId, -body.expenseAmount, session);
-    const expenseNumber = await assignNumber(Expense, 'expenseNumber', 'EXP', body.expenseNumber, session);
+    const expenseStatus = resolveExpenseStatus(body, 'paid');
+    const paidFromAccountId = body.paidFromAccountId || null;
+
+    if (expenseStatus === 'paid') {
+      if (!paidFromAccountId) {
+        throw new ApiError(400, 'paidFromAccountId is required for a paid expense');
+      }
+      await changeAccount(paidFromAccountId, -body.expenseAmount, session);
+    } else if (paidFromAccountId) {
+      await assertAccount(paidFromAccountId, session);
+    }
+
+    const expenseNumber = body.expenseNumber
+      ? await assignNumber(Expense, 'expenseNumber', 'EXP', body.expenseNumber, session)
+      : await nextExpenseNumber(session);
+
     const [doc] = await Expense.create(
       [
         {
           expenseNumber,
           expenseCategoryId: body.expenseCategoryId,
-          paidFromAccountId: body.paidFromAccountId,
+          paidFromAccountId,
           expenseAmount: body.expenseAmount,
           expenseDescription: body.expenseDescription,
-          expenseDate: body.expenseDate || new Date(),
+          expenseDate: body.expenseDate,
+          vendorPayeeName: body.vendorPayeeName || '',
           paymentMethod: body.paymentMethod || 'cash',
+          referenceNumber: body.referenceNumber || '',
+          paymentDate: body.paymentDate || (expenseStatus === 'paid' ? body.expenseDate : null),
+          expenseStatus,
           remarks: body.remarks || '',
           recordedByUserId: req.user._id,
-          approvedByUserId: req.user._id,
+          approvedByUserId: expenseStatus === 'paid' ? req.user._id : null,
         },
       ],
       { session }
@@ -1652,7 +1838,7 @@ async function createExpense(body, req) {
       moduleName: 'expenses',
       entityName: 'Expense',
       entityId: doc._id,
-      newValues: { expenseNumber, expenseAmount: body.expenseAmount },
+      newValues: { expenseNumber, expenseAmount: body.expenseAmount, expenseStatus },
     });
     return doc._id;
   });
@@ -1671,21 +1857,48 @@ async function updateExpense(id, body, req) {
       expense.expenseCategoryId = body.expenseCategoryId;
     }
 
-    const nextAccountId = body.paidFromAccountId || expense.paidFromAccountId;
+    const previousStatus = expense.expenseStatus || 'paid';
+    const nextStatus = resolveExpenseStatus(body, previousStatus);
+    const previousAccountId = expense.paidFromAccountId;
+    const previousAmount = expense.expenseAmount;
+    const nextAccountId = body.paidFromAccountId !== undefined ? body.paidFromAccountId : expense.paidFromAccountId;
     const nextAmount = body.expenseAmount ?? expense.expenseAmount;
-    const accountChanged = String(nextAccountId) !== String(expense.paidFromAccountId);
-    const amountChanged = nextAmount !== expense.expenseAmount;
 
-    if (accountChanged || amountChanged) {
-      await changeAccount(expense.paidFromAccountId, expense.expenseAmount, session);
-      await changeAccount(nextAccountId, -nextAmount, session);
-      expense.paidFromAccountId = nextAccountId;
-      expense.expenseAmount = nextAmount;
+    if (nextStatus === 'paid' && !nextAccountId) {
+      throw new ApiError(400, 'paidFromAccountId is required for a paid expense');
+    }
+    if (nextAccountId) await assertAccount(nextAccountId, session);
+
+    const wasPosted = previousStatus === 'paid' && previousAccountId;
+    const willPost = nextStatus === 'paid' && nextAccountId;
+    const postingChanged = wasPosted !== willPost
+      || (willPost && (String(previousAccountId) !== String(nextAccountId) || previousAmount !== nextAmount));
+
+    if (postingChanged) {
+      if (wasPosted) {
+        await changeAccount(previousAccountId, previousAmount, session);
+      }
+      if (willPost) {
+        await changeAccount(nextAccountId, -nextAmount, session);
+      }
+    }
+
+    expense.paidFromAccountId = nextAccountId || null;
+    expense.expenseAmount = nextAmount;
+    expense.expenseStatus = nextStatus;
+    if (nextStatus === 'paid') {
+      expense.approvedByUserId = expense.approvedByUserId || req.user._id;
+      if (!expense.paymentDate) expense.paymentDate = body.paymentDate || body.expenseDate || expense.expenseDate;
+    } else {
+      expense.approvedByUserId = null;
     }
 
     if (body.expenseDescription !== undefined) expense.expenseDescription = body.expenseDescription;
     if (body.expenseDate !== undefined) expense.expenseDate = body.expenseDate;
+    if (body.vendorPayeeName !== undefined) expense.vendorPayeeName = body.vendorPayeeName;
     if (body.paymentMethod !== undefined) expense.paymentMethod = body.paymentMethod;
+    if (body.referenceNumber !== undefined) expense.referenceNumber = body.referenceNumber;
+    if (body.paymentDate !== undefined) expense.paymentDate = body.paymentDate;
     if (body.remarks !== undefined) expense.remarks = body.remarks;
     await expense.save({ session });
 
@@ -1709,7 +1922,10 @@ async function removeExpense(id, req) {
   await withTransaction(async (session) => {
     const expense = await Expense.findById(id).session(session);
     if (!expense) throw new ApiError(404, 'Expense not found');
-    await changeAccount(expense.paidFromAccountId, expense.expenseAmount, session);
+    const status = expense.expenseStatus || 'paid';
+    if (status === 'paid' && expense.paidFromAccountId) {
+      await changeAccount(expense.paidFromAccountId, expense.expenseAmount, session);
+    }
     await expense.deleteOne({ session });
     await writeAudit({
       req,
@@ -1751,6 +1967,7 @@ const expense = {
   getById: getExpenseById,
   update: updateExpense,
   remove: removeExpense,
+  getFormOptions: getExpenseFormOptions,
 };
 
 module.exports = { sale, salesReturn, payment, expense };

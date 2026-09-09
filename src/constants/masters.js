@@ -126,6 +126,11 @@ const PAYMENT_VOUCHER_STATUSES = [
   { value: 'pending', label: 'Pending' },
 ];
 const PAYMENT_VOUCHER_STATUS_VALUES = PAYMENT_VOUCHER_STATUSES.map((item) => item.value);
+const EXPENSE_STATUSES = [
+  { value: 'paid', label: 'Paid' },
+  { value: 'pending', label: 'Pending' },
+];
+const EXPENSE_STATUS_VALUES = EXPENSE_STATUSES.map((item) => item.value);
 const ASSET_CATEGORIES = ['plant', 'vehicle', 'filling-machine', 'compressor', 'tank', 'building', 'furniture', 'other'];
 const MAINTENANCE_ASSET_STATUSES = ['operational', 'maintenance', 'breakdown', 'retired'];
 const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection', 'emergency'];
@@ -225,6 +230,8 @@ module.exports = {
   PAYMENT_DIRECTION_VALUES,
   PAYMENT_VOUCHER_STATUSES,
   PAYMENT_VOUCHER_STATUS_VALUES,
+  EXPENSE_STATUSES,
+  EXPENSE_STATUS_VALUES,
   ASSET_CATEGORIES,
   MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,
