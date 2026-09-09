@@ -25,7 +25,6 @@ router.use('/inventory-items', masters.inventoryItems);
 router.use('/employees', masters.employees);
 router.use('/accounts', masters.accounts);
 router.use('/expense-categories', masters.expenseCategories);
-router.use('/maintenance-assets', masters.maintenanceAssets);
 router.use('/maintenance-records', masters.maintenanceRecords);
 router.use('/assets', masters.assets);
 router.use('/lpg-receipts', lpgReceipts);

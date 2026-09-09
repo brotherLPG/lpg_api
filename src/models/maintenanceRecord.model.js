@@ -9,10 +9,10 @@ const maintenanceRecordSchema = new mongoose.Schema(
       unique: true,
       trim: true,
     },
-    maintenanceAssetId: {
+    assetId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'MaintenanceAsset',
-      required: [true, 'maintenanceAssetId is required'],
+      ref: 'Asset',
+      required: [true, 'assetId is required'],
     },
     maintenanceType: {
       type: String,
@@ -41,7 +41,7 @@ const maintenanceRecordSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-maintenanceRecordSchema.index({ maintenanceAssetId: 1, maintenanceDate: -1 });
+maintenanceRecordSchema.index({ assetId: 1, maintenanceDate: -1 });
 maintenanceRecordSchema.index({ performedByEmployeeId: 1, maintenanceDate: -1 });
 
 module.exports = mongoose.model('MaintenanceRecord', maintenanceRecordSchema);

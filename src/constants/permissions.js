@@ -19,7 +19,6 @@ const ERP_MODULES = [
   { moduleName: 'payments', actions: ['create', 'read'] },
   { moduleName: 'accounts', actions: ['create', 'read', 'update'] },
   { moduleName: 'employees', actions: ['create', 'read', 'update', 'delete'] },
-  { moduleName: 'maintenance-assets', actions: ['create', 'read', 'update', 'delete'] },
   { moduleName: 'maintenance-records', actions: ['create', 'read', 'update'] },
   { moduleName: 'assets', actions: ['create', 'read', 'update', 'delete'] },
   { moduleName: 'reports', actions: ['read'] },

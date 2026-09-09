@@ -132,6 +132,14 @@ async function seedMasters() {
 async function seed() {
   await connectDB();
 
+  const stalePermissions = await Permission.find({ moduleName: 'maintenance-assets' }).select('_id');
+  const staleIds = stalePermissions.map((item) => item._id);
+  if (staleIds.length) {
+    await Permission.deleteMany({ _id: { $in: staleIds } });
+    await Role.updateMany({}, { $pull: { permissionIds: { $in: staleIds } } });
+    logger.info('Removed maintenance-assets permissions', { count: staleIds.length });
+  }
+
   const catalog = buildPermissionCatalog();
   const permissionIds = [];
 

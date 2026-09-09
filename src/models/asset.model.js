@@ -19,6 +19,9 @@ const assetSchema = new mongoose.Schema(
       enum: ASSET_CATEGORIES,
       required: [true, 'assetCategory is required'],
     },
+    manufacturerName: { type: String, trim: true, default: '' },
+    modelNumber: { type: String, trim: true, default: '' },
+    serialNumber: { type: String, trim: true, default: null },
     purchaseDate: { type: Date, default: null },
     purchaseCostAmount: { type: Number, min: 0, default: 0 },
     locationName: { type: String, trim: true, default: '' },
@@ -44,5 +47,6 @@ const assetSchema = new mongoose.Schema(
 
 assetSchema.index({ assetCategory: 1, assetStatus: 1 });
 assetSchema.index({ assignedEmployeeId: 1 });
+assetSchema.index({ serialNumber: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Asset', assetSchema);

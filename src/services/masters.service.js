@@ -14,7 +14,6 @@ const {
   SalesReturn,
   Payment,
   Expense,
-  MaintenanceAsset,
   MaintenanceRecord,
   Asset,
 } = require('../models');
@@ -40,7 +39,6 @@ const {
   CYLINDER_VALVE_TYPES,
   CYLINDER_MATERIALS,
   ASSET_CATEGORIES,
-  MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,
   ASSET_STATUSES,
   DEPRECIATION_METHODS,
@@ -993,15 +991,15 @@ async function assertWorkEmployee(employeeId) {
   return employee;
 }
 
-async function assertMaintenanceAssetExists(maintenanceAssetId) {
-  const plantAsset = await MaintenanceAsset.findById(maintenanceAssetId);
-  if (!plantAsset) {
-    throw new ApiError(400, 'MaintenanceAsset not found');
+async function assertAssetForMaintenance(assetId) {
+  const asset = await Asset.findById(assetId);
+  if (!asset) {
+    throw new ApiError(400, 'Asset not found');
   }
-  if (plantAsset.operationalStatus === 'retired') {
-    throw new ApiError(400, 'MaintenanceAsset is retired');
+  if (asset.assetStatus === 'disposed') {
+    throw new ApiError(400, 'Asset is disposed');
   }
-  return plantAsset;
+  return asset;
 }
 
 function assertBookValue(payload, existing = {}) {
@@ -1020,41 +1018,6 @@ function assertMaintenanceDates(payload, existing = {}) {
   }
 }
 
-const maintenanceAsset = createMasterService({
-  Model: MaintenanceAsset,
-  entityName: 'MaintenanceAsset',
-  moduleName: 'maintenance-assets',
-  uniqueField: 'assetCode',
-  codePrefix: 'MAS',
-  cachePrefix: 'maintenance-assets:',
-  searchFields: ['assetCode', 'assetName', 'serialNumber', 'locationName', 'manufacturerName'],
-  hasIsActive: false,
-  extraFilters: (query) => {
-    const filter = {};
-    if (query.assetCategory) filter.assetCategory = query.assetCategory;
-    if (query.operationalStatus) filter.operationalStatus = query.operationalStatus;
-    return filter;
-  },
-  listMeta: async () => ({
-    assetCategories: ASSET_CATEGORIES,
-    operationalStatuses: MAINTENANCE_ASSET_STATUSES,
-  }),
-  prepareCreate: async (body) => {
-    if (!body.serialNumber) body.serialNumber = null;
-    return body;
-  },
-  prepareUpdate: async (body) => {
-    if (body.serialNumber === '') body.serialNumber = null;
-    return body;
-  },
-  assertDelete: async (doc) => {
-    const records = await MaintenanceRecord.countDocuments({ maintenanceAssetId: doc._id });
-    if (records > 0) {
-      throw new ApiError(400, 'MaintenanceAsset has records and cannot be deleted');
-    }
-  },
-});
-
 const maintenanceRecord = createMasterService({
   Model: MaintenanceRecord,
   entityName: 'MaintenanceRecord',
@@ -1063,7 +1026,7 @@ const maintenanceRecord = createMasterService({
   codePrefix: 'MNT',
   cachePrefix: 'maintenance-records:',
   populate: [
-    { path: 'maintenanceAssetId', select: 'assetCode assetName assetCategory operationalStatus locationName' },
+    { path: 'assetId', select: 'assetCode assetName assetCategory assetStatus locationName serialNumber' },
     { path: 'performedByEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
     { path: 'approvedByUserId', select: 'fullName emailAddress' },
   ],
@@ -1072,7 +1035,7 @@ const maintenanceRecord = createMasterService({
   allowDelete: false,
   extraFilters: (query) => {
     const filter = {};
-    if (query.maintenanceAssetId) filter.maintenanceAssetId = query.maintenanceAssetId;
+    if (query.assetId) filter.assetId = query.assetId;
     if (query.performedByEmployeeId) filter.performedByEmployeeId = query.performedByEmployeeId;
     if (query.maintenanceType) filter.maintenanceType = query.maintenanceType;
     if (query.startDate || query.endDate) {
@@ -1086,21 +1049,21 @@ const maintenanceRecord = createMasterService({
     maintenanceTypes: MAINTENANCE_TYPES,
   }),
   prepareCreate: async (body, req) => {
-    const plantAsset = await assertMaintenanceAssetExists(body.maintenanceAssetId);
+    const asset = await assertAssetForMaintenance(body.assetId);
     await assertWorkEmployee(body.performedByEmployeeId);
     if (!body.maintenanceDate) body.maintenanceDate = new Date();
     assertMaintenanceDates(body);
     body.approvedByUserId = req.user._id;
-    if (['corrective', 'emergency'].includes(body.maintenanceType) && plantAsset.operationalStatus === 'operational') {
-      plantAsset.operationalStatus = 'maintenance';
-      await plantAsset.save();
-      cache.delByPrefix('maintenance-assets:');
+    if (['corrective', 'emergency'].includes(body.maintenanceType) && asset.assetStatus === 'in-use') {
+      asset.assetStatus = 'under-maintenance';
+      await asset.save();
+      cache.delByPrefix('assets:');
     }
     return body;
   },
   prepareUpdate: async (body, doc) => {
-    if (body.maintenanceAssetId) {
-      await assertMaintenanceAssetExists(body.maintenanceAssetId);
+    if (body.assetId) {
+      await assertAssetForMaintenance(body.assetId);
     }
     if (body.performedByEmployeeId) {
       await assertWorkEmployee(body.performedByEmployeeId);
@@ -1118,7 +1081,7 @@ const asset = createMasterService({
   codePrefix: 'AST',
   cachePrefix: 'assets:',
   populate: [{ path: 'assignedEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' }],
-  searchFields: ['assetCode', 'assetName', 'locationName'],
+  searchFields: ['assetCode', 'assetName', 'serialNumber', 'locationName', 'manufacturerName'],
   hasIsActive: false,
   extraFilters: (query) => {
     const filter = {};
@@ -1134,6 +1097,7 @@ const asset = createMasterService({
   }),
   prepareCreate: async (body) => {
     await assertWorkEmployee(body.assignedEmployeeId);
+    if (!body.serialNumber) body.serialNumber = null;
     if (body.currentBookValueAmount === undefined) {
       body.currentBookValueAmount = body.purchaseCostAmount || 0;
     }
@@ -1144,8 +1108,15 @@ const asset = createMasterService({
     if (body.assignedEmployeeId !== undefined) {
       await assertWorkEmployee(body.assignedEmployeeId);
     }
+    if (body.serialNumber === '') body.serialNumber = null;
     assertBookValue(body, doc);
     return body;
+  },
+  assertDelete: async (doc) => {
+    const records = await MaintenanceRecord.countDocuments({ assetId: doc._id });
+    if (records > 0) {
+      throw new ApiError(400, 'Asset has maintenance records and cannot be deleted');
+    }
   },
 });
 
@@ -1158,7 +1129,6 @@ module.exports = {
   employee,
   account,
   expenseCategory,
-  maintenanceAsset,
   maintenanceRecord,
   asset,
 };

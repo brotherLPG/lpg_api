@@ -9,7 +9,6 @@ const {
 } = require('./common.validation');
 const {
   ASSET_CATEGORIES,
-  MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,
   ASSET_STATUSES,
   DEPRECIATION_METHODS,
@@ -29,20 +28,9 @@ function createSchema(bodyShape) {
   return z.object({ body: z.object(bodyShape) });
 }
 
-const maintenanceAssetBody = {
-  assetCode: optionalCode,
-  assetName: z.string().trim().min(2).max(160),
-  assetCategory: z.enum(ASSET_CATEGORIES),
-  manufacturerName: z.string().trim().max(120).optional(),
-  modelNumber: z.string().trim().max(80).optional(),
-  serialNumber: z.string().trim().max(80).nullish(),
-  locationName: z.string().trim().max(160).optional(),
-  operationalStatus: z.enum(MAINTENANCE_ASSET_STATUSES).optional(),
-};
-
 const maintenanceRecordBody = {
   maintenanceNumber: optionalCode,
-  maintenanceAssetId: objectId,
+  assetId: objectId,
   maintenanceType: z.enum(MAINTENANCE_TYPES),
   maintenanceDate: optionalDate,
   problemDescription: z.string().trim().max(500).optional(),
@@ -54,7 +42,7 @@ const maintenanceRecordBody = {
 
 const maintenanceRecordUpdateBody = {
   maintenanceNumber: optionalCode,
-  maintenanceAssetId: objectId.optional(),
+  assetId: objectId.optional(),
   maintenanceType: z.enum(MAINTENANCE_TYPES).optional(),
   maintenanceDate: optionalDate,
   problemDescription: z.string().trim().max(500).optional(),
@@ -68,6 +56,9 @@ const assetBody = {
   assetCode: optionalCode,
   assetName: z.string().trim().min(2).max(160),
   assetCategory: z.enum(ASSET_CATEGORIES),
+  manufacturerName: z.string().trim().max(120).optional(),
+  modelNumber: z.string().trim().max(80).optional(),
+  serialNumber: z.string().trim().max(80).nullish(),
   purchaseDate: optionalDate,
   purchaseCostAmount: nonNegative.optional(),
   locationName: z.string().trim().max(160).optional(),
@@ -77,16 +68,6 @@ const assetBody = {
   assetStatus: z.enum(ASSET_STATUSES).optional(),
 };
 
-const maintenanceAsset = {
-  create: createSchema(maintenanceAssetBody),
-  update: createUpdateSchema(maintenanceAssetBody),
-  list: listMasterQuery({
-    assetCategory: z.enum(ASSET_CATEGORIES).optional(),
-    operationalStatus: z.enum(MAINTENANCE_ASSET_STATUSES).optional(),
-  }),
-  idParam: idParamSchema,
-};
-
 const maintenanceRecord = {
   create: createSchema(maintenanceRecordBody),
   update: z.object({
@@ -94,7 +75,7 @@ const maintenanceRecord = {
     body: atLeastOneField(z.object(maintenanceRecordUpdateBody)),
   }),
   list: listMasterQuery({
-    maintenanceAssetId: objectId.optional(),
+    assetId: objectId.optional(),
     performedByEmployeeId: objectId.optional(),
     maintenanceType: z.enum(MAINTENANCE_TYPES).optional(),
     startDate: z.coerce.date().optional(),
@@ -114,4 +95,4 @@ const asset = {
   idParam: idParamSchema,
 };
 
-module.exports = { maintenanceAsset, maintenanceRecord, asset };
+module.exports = { maintenanceRecord, asset };

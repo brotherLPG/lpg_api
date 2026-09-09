@@ -132,7 +132,6 @@ const EXPENSE_STATUSES = [
 ];
 const EXPENSE_STATUS_VALUES = EXPENSE_STATUSES.map((item) => item.value);
 const ASSET_CATEGORIES = ['plant', 'vehicle', 'filling-machine', 'compressor', 'tank', 'building', 'furniture', 'other'];
-const MAINTENANCE_ASSET_STATUSES = ['operational', 'maintenance', 'breakdown', 'retired'];
 const MAINTENANCE_TYPES = ['preventive', 'corrective', 'inspection', 'emergency'];
 const ASSET_STATUSES = ['in-use', 'idle', 'under-maintenance', 'disposed'];
 const DEPRECIATION_METHODS = ['straight-line', 'reducing-balance', 'none'];
@@ -233,7 +232,6 @@ module.exports = {
   EXPENSE_STATUSES,
   EXPENSE_STATUS_VALUES,
   ASSET_CATEGORIES,
-  MAINTENANCE_ASSET_STATUSES,
   MAINTENANCE_TYPES,
   ASSET_STATUSES,
   DEPRECIATION_METHODS,
