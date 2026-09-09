@@ -3,6 +3,8 @@ const {
   objectId,
   optionalEmail,
   optionalLinkedId,
+  phoneNumber,
+  cnicNumber,
   code,
   nonNegative,
   positiveKg,
@@ -16,6 +18,8 @@ const {
   ACCOUNT_CATEGORY_VALUES,
   ACCOUNT_RECORD_STATUS_VALUES,
   EMPLOYMENT_STATUSES,
+  EMPLOYEE_DEPARTMENT_VALUES,
+  GENDER_VALUES,
   ITEM_CATEGORIES,
   UNITS_OF_MEASURE,
   STOCK_STATUS_VALUES,
@@ -48,6 +52,14 @@ const optionalEnum = (values) =>
     z.enum(values).optional()
   );
 const optionalDate = z.coerce.date().nullish();
+const optionalCnicNumber = z.preprocess(
+  (value) => (value === '' || value === undefined || value === null ? undefined : value),
+  cnicNumber.optional()
+);
+const optionalPhoneNumber = z.preprocess(
+  (value) => (value === '' || value === undefined || value === null ? undefined : value),
+  phoneNumber.optional()
+);
 
 const customerBody = {
   customerCode: code.optional(),
@@ -167,12 +179,19 @@ const inventoryUpdateBody = {
 const employeeBody = {
   employeeCode: code.optional(),
   fullName: z.string().trim().min(2).max(120),
-  departmentName: z.string().trim().max(80).optional(),
+  fatherHusbandName: z.string().trim().max(120).optional(),
+  cnicNumber: optionalCnicNumber,
+  dateOfBirth: optionalDate,
+  gender: optionalEnum(GENDER_VALUES),
+  departmentName: optionalEnum(EMPLOYEE_DEPARTMENT_VALUES),
   jobTitle: z.string().trim().max(80).optional(),
-  phoneNumber: z.string().trim().max(40).optional(),
+  phoneNumber,
   emailAddress: optionalEmail,
   joiningDate: optionalDate,
   monthlySalaryAmount: nonNegative.optional(),
+  emergencyContactName: z.string().trim().max(160).optional(),
+  emergencyContactPhone: optionalPhoneNumber,
+  homeAddress: z.string().trim().max(400).optional(),
   employmentStatus: z.enum(EMPLOYMENT_STATUSES).optional(),
 };
 
@@ -282,7 +301,12 @@ const inventoryItem = {
 const employee = {
   create: createSchema(employeeBody),
   update: createUpdateSchema(employeeBody),
-  list: listMasterQuery({ employmentStatus: z.enum(EMPLOYMENT_STATUSES).optional() }),
+  list: listMasterQuery({
+    employmentStatus: z.enum(EMPLOYMENT_STATUSES).optional(),
+    status: z.enum(EMPLOYMENT_STATUSES).optional(),
+    departmentName: z.enum(EMPLOYEE_DEPARTMENT_VALUES).optional(),
+    department: z.enum(EMPLOYEE_DEPARTMENT_VALUES).optional(),
+  }),
   idParam: idParamSchema,
 };
 

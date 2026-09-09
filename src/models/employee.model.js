@@ -14,12 +14,19 @@ const employeeSchema = new mongoose.Schema(
       required: [true, 'fullName is required'],
       trim: true,
     },
+    fatherHusbandName: { type: String, trim: true, default: '' },
+    cnicNumber: { type: String, trim: true, default: '' },
+    dateOfBirth: { type: Date, default: null },
+    gender: { type: String, trim: true, lowercase: true, default: '' },
     departmentName: { type: String, trim: true, default: '' },
     jobTitle: { type: String, trim: true, default: '' },
     phoneNumber: { type: String, trim: true, default: '' },
     emailAddress: { type: String, trim: true, lowercase: true, default: '' },
     joiningDate: { type: Date, default: null },
     monthlySalaryAmount: { type: Number, min: 0, default: 0 },
+    emergencyContactName: { type: String, trim: true, default: '' },
+    emergencyContactPhone: { type: String, trim: true, default: '' },
+    homeAddress: { type: String, trim: true, default: '' },
     employmentStatus: {
       type: String,
       enum: EMPLOYMENT_STATUSES,
@@ -30,6 +37,8 @@ const employeeSchema = new mongoose.Schema(
 );
 
 employeeSchema.index({ employmentStatus: 1 });
+employeeSchema.index({ departmentName: 1, employmentStatus: 1 });
 employeeSchema.index({ fullName: 1 });
+employeeSchema.index({ cnicNumber: 1 });
 
 module.exports = mongoose.model('Employee', employeeSchema);

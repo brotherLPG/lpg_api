@@ -27,7 +27,9 @@ const {
   ACCOUNT_TYPE_OPTIONS,
   ACCOUNT_CATEGORIES,
   ACCOUNT_RECORD_STATUSES,
-  EMPLOYMENT_STATUSES,
+  EMPLOYMENT_STATUS_OPTIONS,
+  EMPLOYEE_DEPARTMENTS,
+  GENDER_OPTIONS,
   ITEM_CATEGORY_OPTIONS,
   UNIT_OF_MEASURE_OPTIONS,
   STOCK_STATUSES,
@@ -659,6 +661,64 @@ const inventoryItem = createMasterService({
   },
 });
 
+async function assertUniqueEmployeeCnic(cnicNumber, excludeId) {
+  if (!cnicNumber) return;
+  const filter = { cnicNumber };
+  if (excludeId) filter._id = { $ne: excludeId };
+  const exists = await Employee.findOne(filter).select('_id employeeCode');
+  if (exists) {
+    throw new ApiError(409, `CNIC already exists on ${exists.employeeCode}`);
+  }
+}
+
+function departmentLabelOf(value) {
+  return EMPLOYEE_DEPARTMENTS.find((item) => item.value === value)?.label || titleCase(value);
+}
+
+function employmentStatusLabelOf(value) {
+  return EMPLOYMENT_STATUS_OPTIONS.find((item) => item.value === value)?.label || titleCase(value);
+}
+
+function genderLabelOf(value) {
+  return GENDER_OPTIONS.find((item) => item.value === value)?.label || titleCase(value);
+}
+
+function mapEmployee(employee) {
+  return {
+    _id: employee._id,
+    employeeCode: employee.employeeCode,
+    fullName: employee.fullName,
+    fatherHusbandName: employee.fatherHusbandName || '',
+    cnicNumber: employee.cnicNumber || '',
+    dateOfBirth: employee.dateOfBirth || null,
+    gender: employee.gender || '',
+    genderLabel: genderLabelOf(employee.gender),
+    departmentName: employee.departmentName || '',
+    departmentLabel: departmentLabelOf(employee.departmentName),
+    jobTitle: employee.jobTitle || '',
+    phoneNumber: employee.phoneNumber || '',
+    emailAddress: employee.emailAddress || '',
+    joiningDate: employee.joiningDate || null,
+    monthlySalaryAmount: roundMoney(employee.monthlySalaryAmount),
+    emergencyContactName: employee.emergencyContactName || '',
+    emergencyContactPhone: employee.emergencyContactPhone || '',
+    homeAddress: employee.homeAddress || '',
+    employmentStatus: employee.employmentStatus || 'active',
+    employmentStatusLabel: employmentStatusLabelOf(employee.employmentStatus),
+    createdAt: employee.createdAt,
+    updatedAt: employee.updatedAt,
+  };
+}
+
+async function employeeFormOptions() {
+  return {
+    nextEmployeeCode: await nextSequentialCode(Employee, 'employeeCode', 'EMP'),
+    departments: EMPLOYEE_DEPARTMENTS,
+    genders: GENDER_OPTIONS,
+    statuses: EMPLOYMENT_STATUS_OPTIONS,
+  };
+}
+
 const employee = createMasterService({
   Model: Employee,
   entityName: 'Employee',
@@ -666,16 +726,35 @@ const employee = createMasterService({
   uniqueField: 'employeeCode',
   codePrefix: 'EMP',
   cachePrefix: 'employees:',
-  searchFields: ['employeeCode', 'fullName', 'phoneNumber', 'emailAddress', 'jobTitle'],
+  searchFields: ['employeeCode', 'fullName', 'fatherHusbandName', 'phoneNumber', 'emailAddress', 'jobTitle', 'cnicNumber'],
   hasIsActive: false,
   extraFilters: (query) => {
     const filter = {};
-    if (query.employmentStatus) filter.employmentStatus = query.employmentStatus;
+    const department = query.departmentName || query.department;
+    if (department) filter.departmentName = department;
+    const status = query.employmentStatus || query.status;
+    if (status) filter.employmentStatus = status;
     return filter;
   },
+  mapItem: mapEmployee,
   listMeta: async () => ({
-    employmentStatuses: EMPLOYMENT_STATUSES,
+    departments: EMPLOYEE_DEPARTMENTS,
+    statuses: EMPLOYMENT_STATUS_OPTIONS,
   }),
+  formOptions: employeeFormOptions,
+  prepareCreate: async (body) => {
+    await assertUniqueEmployeeCnic(body.cnicNumber);
+    return {
+      ...body,
+      employmentStatus: body.employmentStatus || 'active',
+    };
+  },
+  prepareUpdate: async (body, doc) => {
+    if (body.cnicNumber !== undefined) {
+      await assertUniqueEmployeeCnic(body.cnicNumber, doc._id);
+    }
+    return body;
+  },
   assertDelete: async (doc) => {
     const linked = await User.countDocuments({ employeeId: doc._id });
     if (linked > 0) {
@@ -684,6 +763,10 @@ const employee = createMasterService({
     const batches = await FillingBatch.countDocuments({ operatorEmployeeId: doc._id });
     if (batches > 0) {
       throw new ApiError(400, 'Employee has filling batches and cannot be deleted');
+    }
+    const receipts = await LPGReceipt.countDocuments({ receivedByEmployeeId: doc._id });
+    if (receipts > 0) {
+      throw new ApiError(400, 'Employee has LPG receipts and cannot be deleted');
     }
     const maintenance = await MaintenanceRecord.countDocuments({ performedByEmployeeId: doc._id });
     if (maintenance > 0) {

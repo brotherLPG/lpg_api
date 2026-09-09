@@ -26,6 +26,29 @@ const ACCOUNT_RECORD_STATUSES = [
 ];
 const ACCOUNT_RECORD_STATUS_VALUES = ACCOUNT_RECORD_STATUSES.map((item) => item.value);
 const EMPLOYMENT_STATUSES = ['active', 'inactive', 'terminated'];
+const EMPLOYMENT_STATUS_OPTIONS = [
+  { value: 'active', label: 'Active' },
+  { value: 'inactive', label: 'Inactive' },
+  { value: 'terminated', label: 'Terminated' },
+];
+const EMPLOYEE_DEPARTMENTS = [
+  { value: 'filling', label: 'Filling' },
+  { value: 'maintenance', label: 'Maintenance' },
+  { value: 'operations', label: 'Operations' },
+  { value: 'sales', label: 'Sales' },
+  { value: 'accounts', label: 'Accounts' },
+  { value: 'stores', label: 'Stores' },
+  { value: 'transport', label: 'Transport' },
+  { value: 'security', label: 'Security' },
+  { value: 'admin', label: 'Administration' },
+];
+const EMPLOYEE_DEPARTMENT_VALUES = EMPLOYEE_DEPARTMENTS.map((item) => item.value);
+const GENDER_OPTIONS = [
+  { value: 'male', label: 'Male' },
+  { value: 'female', label: 'Female' },
+  { value: 'other', label: 'Other' },
+];
+const GENDER_VALUES = GENDER_OPTIONS.map((item) => item.value);
 const ITEM_CATEGORIES = ['filled-cylinder', 'empty-cylinder', 'lpg', 'spare', 'other'];
 const ITEM_CATEGORY_OPTIONS = [
   { value: 'filled-cylinder', label: 'Filled Cylinder' },
@@ -173,6 +196,11 @@ module.exports = {
   ACCOUNT_RECORD_STATUSES,
   ACCOUNT_RECORD_STATUS_VALUES,
   EMPLOYMENT_STATUSES,
+  EMPLOYMENT_STATUS_OPTIONS,
+  EMPLOYEE_DEPARTMENTS,
+  EMPLOYEE_DEPARTMENT_VALUES,
+  GENDER_OPTIONS,
+  GENDER_VALUES,
   ITEM_CATEGORIES,
   ITEM_CATEGORY_OPTIONS,
   UNITS_OF_MEASURE,
