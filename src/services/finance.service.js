@@ -65,10 +65,18 @@ function roundMoney(value) {
 }
 
 function applyDateRange(filter, field, query) {
-  if (!query.startDate && !query.endDate) return filter;
+  const startDate = query.startDate || query.fromDate || query.dateFrom;
+  const endDate = query.endDate || query.toDate || query.dateTo;
+  if (!startDate && !endDate) return filter;
   filter[field] = {};
-  if (query.startDate) filter[field].$gte = new Date(query.startDate);
-  if (query.endDate) filter[field].$lte = new Date(query.endDate);
+  if (startDate) filter[field].$gte = new Date(startDate);
+  if (endDate) {
+    const end = new Date(endDate);
+    if (end.getHours() === 0 && end.getMinutes() === 0 && end.getSeconds() === 0 && end.getMilliseconds() === 0) {
+      end.setHours(23, 59, 59, 999);
+    }
+    filter[field].$lte = end;
+  }
   return filter;
 }
 
@@ -283,6 +291,7 @@ function toSaleItem(sale) {
       quantity: line.quantity,
       unitPriceAmount: roundMoney(line.unitPriceAmount),
       discountAmount: roundMoney(line.discountAmount),
+      taxRatePercent: Math.round(GST_TAX_RATE * 100),
       taxAmount: roundMoney(line.taxAmount),
       lineTotalAmount: roundMoney(line.lineTotalAmount),
     };
@@ -297,17 +306,21 @@ function toSaleItem(sale) {
     customerCode: customer?.customerCode || '',
     invoiceDate: sale.invoiceDate,
     saleType,
+    type: saleType,
     saleTypeLabel: SALE_TYPES.find((item) => item.value === saleType)?.label || saleType,
     paymentTermDays: sale.paymentTermDays ?? customer?.paymentTermDays ?? 0,
     lineItems,
     itemCount: lineItems.length,
     itemQuantity: itemQuantityOf(sale),
+    items: itemQuantityOf(sale),
     subtotalAmount: roundMoney(sale.subtotalAmount),
     discountAmount: roundMoney(sale.discountAmount),
     tradeDiscountAmount: roundMoney(sale.tradeDiscountAmount),
     taxAmount: roundMoney(sale.taxAmount),
     taxRate: GST_TAX_RATE,
+    taxRatePercent: Math.round(GST_TAX_RATE * 100),
     totalAmount: roundMoney(sale.totalAmount),
+    amount: roundMoney(sale.totalAmount),
     paidAmount: roundMoney(sale.paidAmount),
     returnedAmount: roundMoney(sale.returnedAmount),
     outstandingAmount: roundMoney(sale.outstandingAmount),
@@ -316,6 +329,7 @@ function toSaleItem(sale) {
     saleStatus: sale.saleStatus,
     saleStatusLabel: saleStatusLabel(sale.saleStatus),
     remarks: sale.remarks || '',
+    internalRemarks: sale.remarks || '',
     createdAt: sale.createdAt,
     updatedAt: sale.updatedAt,
   };
@@ -573,6 +587,7 @@ async function getSaleFormOptions() {
     nextInvoiceNumber: nextInvoice,
     taxRate: GST_TAX_RATE,
     taxRatePercent: Math.round(GST_TAX_RATE * 100),
+    defaultPaymentTermDays: 0,
     paymentTerms: PAYMENT_TERMS,
     saleTypes: SALE_TYPES,
     customers: customers.map((customer) => ({
@@ -1379,7 +1394,7 @@ async function createSale(body, req) {
           paymentStatus: balances.paymentStatus,
           saleStatus: isDraft ? 'draft' : 'confirmed',
           createdByUserId: req.user._id,
-          remarks: body.remarks || '',
+          remarks: body.remarks || body.internalRemarks || '',
         },
       ],
       { session }
@@ -1421,12 +1436,74 @@ async function createSale(body, req) {
   return getSaleById(result);
 }
 
+async function applyDraftSaleFields(sale, body, session) {
+  const customer = await assertCustomer(body.customerId || sale.customerId, session);
+  sale.customerId = customer._id;
+  if (body.invoiceDate !== undefined) sale.invoiceDate = body.invoiceDate;
+  if (body.paymentTermDays !== undefined) sale.paymentTermDays = body.paymentTermDays;
+  if (body.remarks !== undefined || body.internalRemarks !== undefined) {
+    sale.remarks = body.remarks ?? body.internalRemarks;
+  }
+
+  if (body.lineItems) {
+    sale.lineItems = await buildSaleLines(body.lineItems, session);
+  }
+
+  const tradeDiscount = body.tradeDiscountAmount !== undefined
+    ? body.tradeDiscountAmount
+    : sale.tradeDiscountAmount;
+  const totals = totalsFromLines(sale.lineItems, tradeDiscount);
+  sale.subtotalAmount = totals.subtotalAmount;
+  sale.discountAmount = totals.discountAmount;
+  sale.tradeDiscountAmount = totals.tradeDiscountAmount;
+  sale.taxAmount = totals.taxAmount;
+  sale.totalAmount = totals.totalAmount;
+
+  if (body.amountPaid !== undefined || body.payment?.paymentAmount !== undefined) {
+    const amountPaid = roundMoney(body.amountPaid ?? body.payment.paymentAmount);
+    if (amountPaid > totals.totalAmount) {
+      throw new ApiError(400, 'Amount paid cannot exceed sale total');
+    }
+    sale.paidAmount = amountPaid;
+  } else if (sale.paidAmount > totals.totalAmount) {
+    throw new ApiError(400, 'Amount paid cannot exceed sale total');
+  }
+
+  const balances = deriveBalances(sale.totalAmount, sale.paidAmount, sale.returnedAmount || 0);
+  sale.outstandingAmount = balances.outstandingAmount;
+  sale.paymentStatus = balances.paymentStatus;
+  sale.saleType = balances.outstandingAmount > 0 ? 'credit' : 'cash';
+  return customer;
+}
+
 async function updateSale(id, body, req) {
   const result = await withTransaction(async (session) => {
     const sale = await Sale.findById(id).session(session);
     if (!sale) throw new ApiError(404, 'Sale not found');
 
-    if (body.saleStatus === 'confirmed') {
+    if (body.saveAsDraft === true && (body.saleStatus === 'confirmed' || body.saleStatus === 'cancelled')) {
+      throw new ApiError(400, 'Cannot change sale status while saving as draft');
+    }
+
+    const wantsDraftEdit = [
+      'customerId',
+      'invoiceDate',
+      'paymentTermDays',
+      'lineItems',
+      'tradeDiscountAmount',
+      'amountPaid',
+      'payment',
+    ].some((key) => body[key] !== undefined);
+
+    if (wantsDraftEdit) {
+      if (sale.saleStatus !== 'draft') {
+        throw new ApiError(400, 'Only a draft sale can be edited');
+      }
+      await applyDraftSaleFields(sale, body, session);
+    }
+
+    const shouldConfirm = body.saleStatus === 'confirmed' || body.saveAsDraft === false;
+    if (shouldConfirm) {
       if (sale.saleStatus !== 'draft') {
         throw new ApiError(400, 'Only a draft sale can be confirmed');
       }
@@ -1442,8 +1519,10 @@ async function updateSale(id, body, req) {
           sale,
           customerId: customer._id,
           amount: sale.paidAmount,
-          accountId: body.accountId,
+          accountId: body.accountId || body.payment?.accountId,
+          paymentMethod: body.payment?.paymentMethod,
           paymentDate: sale.invoiceDate,
+          referenceNumber: body.payment?.referenceNumber,
           userId: req.user._id,
         }, session);
       }
@@ -1470,8 +1549,8 @@ async function updateSale(id, body, req) {
       sale.paymentStatus = 'unpaid';
     }
 
-    if (body.remarks !== undefined) {
-      sale.remarks = body.remarks;
+    if (body.remarks !== undefined || body.internalRemarks !== undefined) {
+      sale.remarks = body.remarks ?? body.internalRemarks;
     }
     await sale.save({ session });
     await writeAudit({

@@ -15,16 +15,18 @@ const {
   EXPENSE_STATUS_VALUES,
   SALE_STATUSES,
   SALE_TYPE_VALUES,
-  PAYMENT_TERM_DAYS,
+  PAYMENT_STATUSES,
   RETURN_REASON_VALUES,
 } = require('../constants/masters');
 
-const paymentTermDays = z.coerce
-  .number()
-  .int()
-  .refine((value) => PAYMENT_TERM_DAYS.includes(value), {
-    message: 'Invalid payment terms',
-  });
+const paymentTermDays = z.coerce.number().int().min(0);
+
+const allOr = (schema) =>
+  z.preprocess((value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value === 'string' && value.toLowerCase() === 'all') return undefined;
+    return value;
+  }, schema.optional());
 
 const optionalDate = z.coerce.date().optional();
 const optionalCode = code.optional();
@@ -59,6 +61,7 @@ const sale = {
       amountPaid: nonNegative.optional(),
       accountId: objectId.optional(),
       remarks: z.string().trim().max(500).optional(),
+      internalRemarks: z.string().trim().max(500).optional(),
       saveAsDraft: z.boolean().optional(),
       payment: salePayment.optional(),
     }),
@@ -67,20 +70,31 @@ const sale = {
     params: z.object({ id: objectId }),
     body: atLeastOneField(
       z.object({
-        remarks: z.string().trim().max(500).optional(),
-        saleStatus: z.enum(['cancelled', 'confirmed']).optional(),
+        customerId: objectId.optional(),
+        invoiceDate: optionalDate,
+        paymentTermDays: paymentTermDays.optional(),
+        lineItems: z.array(saleLine).min(1).optional(),
+        tradeDiscountAmount: nonNegative.optional(),
+        amountPaid: nonNegative.optional(),
         accountId: objectId.optional(),
+        remarks: z.string().trim().max(500).optional(),
+        internalRemarks: z.string().trim().max(500).optional(),
+        saveAsDraft: z.boolean().optional(),
+        saleStatus: z.enum(['cancelled', 'confirmed']).optional(),
+        payment: salePayment.optional(),
       })
     ),
   }),
   list: listMasterQuery({
     customerId: objectId.optional(),
-    paymentStatus: z.string().optional(),
-    saleStatus: z.enum(SALE_STATUSES).optional(),
-    saleType: z.enum(SALE_TYPE_VALUES).optional(),
-    type: z.enum(SALE_TYPE_VALUES).optional(),
+    paymentStatus: allOr(z.enum(PAYMENT_STATUSES)),
+    saleStatus: allOr(z.enum(SALE_STATUSES)),
+    saleType: allOr(z.enum(SALE_TYPE_VALUES)),
+    type: allOr(z.enum(SALE_TYPE_VALUES)),
     startDate: z.coerce.date().optional(),
     endDate: z.coerce.date().optional(),
+    fromDate: z.coerce.date().optional(),
+    toDate: z.coerce.date().optional(),
   }),
   idParam: idParamSchema,
 };
