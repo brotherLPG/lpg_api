@@ -75,7 +75,7 @@ const SALE_TYPES = [
   { value: 'credit', label: 'Credit' },
 ];
 const SALE_TYPE_VALUES = SALE_TYPES.map((item) => item.value);
-const GST_TAX_RATE = 0.17;
+const GST_TAX_RATE = 0;
 const RETURN_REASONS = [
   { value: 'defective-valve', label: 'Defective Cylinder (Valves Leaking)' },
   { value: 'defective-cylinder', label: 'Defective Cylinder' },
