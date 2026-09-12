@@ -352,19 +352,49 @@ async function nextInvoiceNumber(session) {
   return nextSequentialCode(Sale, 'invoiceNumber', `INV-${year}`, 4, session);
 }
 
+function pickSaleAccountId(body) {
+  const raw = body?.accountId || body?.paymentAccountId || body?.paidFromAccountId || body?.payment?.accountId;
+  if (!raw) return null;
+  if (typeof raw === 'object' && raw._id) return raw._id;
+  return raw;
+}
+
+function paymentMethodForAccount(account, explicit) {
+  if (explicit) return explicit;
+  if (account?.accountType === 'bank') return 'bank';
+  if (account?.accountType === 'cash') return 'cash';
+  return 'cash';
+}
+
+function accountLabel(account) {
+  if (!account) return '';
+  return `${account.accountCode} – ${account.accountName}`;
+}
+
+function mapAccountOption(account) {
+  return {
+    _id: account._id,
+    accountCode: account.accountCode,
+    accountName: account.accountName,
+    accountType: account.accountType,
+    isPrimary: Boolean(account.isPrimary),
+    label: accountLabel(account),
+  };
+}
+
+async function loadActiveAccounts(filter = {}, session) {
+  let query = Account.find({ isActive: true, ...filter })
+    .select('accountCode accountName accountType isPrimary currentBalanceAmount')
+    .sort({ isPrimary: -1, accountName: 1 });
+  if (session) query = query.session(session);
+  return query.lean();
+}
+
 async function resolveReceiveAccount(accountId, session) {
   if (accountId) {
     return assertAccount(accountId, session);
   }
-  const primary = await Account.findOne({
-    isPrimary: true,
-    isActive: true,
-    accountType: { $in: ['cash', 'bank'] },
-  }).session(session);
-  if (primary) return primary;
-  const cash = await Account.findOne({ isActive: true, accountType: 'cash' }).sort({ createdAt: 1 }).session(session);
-  if (cash) return cash;
-  throw new ApiError(400, 'No cash or bank account is configured to receive payment');
+  throw new ApiError(400, 'accountId is required when amount paid is greater than 0');
 }
 
 async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMethod, paymentDate, referenceNumber, userId }, session) {
@@ -380,7 +410,7 @@ async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMet
         saleId: sale._id,
         accountId: account._id,
         paymentAmount: amount,
-        paymentMethod: paymentMethod || 'cash',
+        paymentMethod: paymentMethodForAccount(account, paymentMethod),
         paymentDate: paymentDate || sale.invoiceDate || new Date(),
         referenceNumber: referenceNumber || '',
         receivedOrPaidByUserId: userId,
@@ -389,6 +419,39 @@ async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMet
     { session }
   );
   return account;
+}
+
+async function receiptAccountsBySaleIds(saleIds) {
+  if (!saleIds.length) return new Map();
+  const payments = await Payment.find({
+    saleId: { $in: saleIds },
+    paymentType: 'receive',
+  })
+    .sort({ createdAt: 1 })
+    .populate('accountId', 'accountCode accountName accountType')
+    .lean();
+
+  const firstBySale = new Map();
+  for (const payment of payments) {
+    const key = String(payment.saleId);
+    if (!firstBySale.has(key)) firstBySale.set(key, payment);
+  }
+  return firstBySale;
+}
+
+function withReceiptAccount(sale, payment) {
+  const account = payment?.accountId && typeof payment.accountId === 'object' ? payment.accountId : null;
+  return {
+    ...sale,
+    accountId: account?._id || payment?.accountId || null,
+    accountName: account ? accountLabel(account) : '',
+    accountType: account?.accountType || '',
+  };
+}
+
+async function attachReceiptAccounts(sales) {
+  const receipts = await receiptAccountsBySaleIds(sales.map((sale) => sale._id).filter(Boolean));
+  return sales.map((sale) => withReceiptAccount(sale, receipts.get(String(sale._id))));
 }
 
 async function assertCreditLimit(customer, extraAmount, session, excludeSaleId) {
@@ -422,8 +485,9 @@ async function getSaleById(id) {
   const doc = await populateQuery(Sale.findById(id), SALE_POPULATE);
   if (!doc) throw new ApiError(404, 'Sale not found');
   const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  const [sale] = await attachReceiptAccounts([toSaleItem(plain)]);
   return {
-    ...toSaleItem(plain),
+    ...sale,
     form: await getSaleFormOptions({ id }),
   };
 }
@@ -553,7 +617,7 @@ async function listSales(query) {
   ]);
 
   return {
-    ...paginated(items.map(toSaleItem), total, page, limit),
+    ...paginated(await attachReceiptAccounts(items.map(toSaleItem)), total, page, limit),
     summary,
     meta: {
       saleTypes: SALE_TYPES,
@@ -576,10 +640,7 @@ async function getSaleFormOptions() {
       .select('itemCode itemName itemCategory unitOfMeasure currentQuantity unitSellingPriceAmount cylinderTypeId')
       .sort({ itemName: 1 })
       .lean(),
-    Account.find({ isActive: true, accountType: { $in: ['cash', 'bank'] } })
-      .select('accountCode accountName accountType isPrimary currentBalanceAmount')
-      .sort({ isPrimary: -1, accountName: 1 })
-      .lean(),
+    loadActiveAccounts(),
   ]);
 
   return {
@@ -609,14 +670,7 @@ async function getSaleFormOptions() {
       unitPriceAmount: roundMoney(defaultUnitPrice(item)),
       label: `${item.itemCode} – ${item.itemName}`,
     })),
-    accounts: accounts.map((account) => ({
-      _id: account._id,
-      accountCode: account.accountCode,
-      accountName: account.accountName,
-      accountType: account.accountType,
-      isPrimary: Boolean(account.isPrimary),
-      label: `${account.accountCode} – ${account.accountName}`,
-    })),
+    accounts: accounts.map(mapAccountOption),
   };
 }
 
@@ -1405,8 +1459,8 @@ async function createSale(body, req) {
         sale,
         customerId: customer._id,
         amount: amountPaid,
-        accountId: body.accountId || body.payment?.accountId,
-        paymentMethod: body.payment?.paymentMethod || (saleType === 'cash' ? 'cash' : 'cash'),
+        accountId: pickSaleAccountId(body),
+        paymentMethod: body.payment?.paymentMethod,
         paymentDate: body.invoiceDate,
         referenceNumber: body.payment?.referenceNumber,
         userId: req.user._id,
@@ -1492,6 +1546,9 @@ async function updateSale(id, body, req) {
       'lineItems',
       'tradeDiscountAmount',
       'amountPaid',
+      'accountId',
+      'paymentAccountId',
+      'paidFromAccountId',
       'payment',
     ].some((key) => body[key] !== undefined);
 
@@ -1519,7 +1576,7 @@ async function updateSale(id, body, req) {
           sale,
           customerId: customer._id,
           amount: sale.paidAmount,
-          accountId: body.accountId || body.payment?.accountId,
+          accountId: pickSaleAccountId(body),
           paymentMethod: body.payment?.paymentMethod,
           paymentDate: sale.invoiceDate,
           referenceNumber: body.payment?.referenceNumber,

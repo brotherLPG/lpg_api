@@ -33,6 +33,12 @@ const optionalCode = code.optional();
 const positiveAmount = z.coerce.number().gt(0);
 const positiveQty = z.coerce.number().gt(0);
 
+const optionalAccountId = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'object' && value._id) return String(value._id);
+  return value;
+}, objectId.optional());
+
 const saleLine = z.object({
   inventoryItemId: objectId,
   itemDescription: z.string().trim().max(160).optional(),
@@ -42,11 +48,17 @@ const saleLine = z.object({
 });
 
 const salePayment = z.object({
-  accountId: objectId,
-  paymentAmount: positiveAmount,
+  accountId: optionalAccountId,
+  paymentAmount: positiveAmount.optional(),
   paymentMethod: z.enum(PAYMENT_METHODS).optional(),
   referenceNumber: z.string().trim().max(80).optional(),
 });
+
+const saleAccountFields = {
+  accountId: optionalAccountId,
+  paymentAccountId: optionalAccountId,
+  paidFromAccountId: optionalAccountId,
+};
 
 const sale = {
   create: z.object({
@@ -59,7 +71,7 @@ const sale = {
       lineItems: z.array(saleLine).min(1),
       tradeDiscountAmount: nonNegative.optional(),
       amountPaid: nonNegative.optional(),
-      accountId: objectId.optional(),
+      ...saleAccountFields,
       remarks: z.string().trim().max(500).optional(),
       internalRemarks: z.string().trim().max(500).optional(),
       saveAsDraft: z.boolean().optional(),
@@ -76,7 +88,7 @@ const sale = {
         lineItems: z.array(saleLine).min(1).optional(),
         tradeDiscountAmount: nonNegative.optional(),
         amountPaid: nonNegative.optional(),
-        accountId: objectId.optional(),
+        ...saleAccountFields,
         remarks: z.string().trim().max(500).optional(),
         internalRemarks: z.string().trim().max(500).optional(),
         saveAsDraft: z.boolean().optional(),
