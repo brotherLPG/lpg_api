@@ -10,6 +10,7 @@ const {
   positiveKg,
   idParamSchema,
   listMasterQuery,
+  paginationQuery,
   atLeastOneField,
 } = require('./common.validation');
 const {
@@ -251,11 +252,23 @@ function createSchema(bodyShape) {
   return z.object({ body: z.object(bodyShape) });
 }
 
+const customerHistoryQuery = z.object({
+  params: z.object({ id: objectId }),
+  query: paginationQuery.extend({
+    search: z.string().optional(),
+    startDate: z.coerce.date().optional(),
+    endDate: z.coerce.date().optional(),
+    fromDate: z.coerce.date().optional(),
+    toDate: z.coerce.date().optional(),
+  }),
+});
+
 const customer = {
   create: createSchema(customerBody),
   update: createUpdateSchema(customerBody),
   list: listMasterQuery(),
   idParam: idParamSchema,
+  history: customerHistoryQuery,
 };
 
 const supplier = {

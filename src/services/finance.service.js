@@ -2076,6 +2076,195 @@ async function removeExpense(id, req) {
   invalidateFinance();
 }
 
+async function loadCustomerForLedger(customerId) {
+  const customer = await Customer.findById(customerId).lean();
+  if (!customer) {
+    throw new ApiError(404, 'Customer not found');
+  }
+  return customer;
+}
+
+function eventTimestamp(date, createdAt) {
+  return new Date(date || createdAt || 0).getTime();
+}
+
+function computePaymentBalanceAfter(openingBalanceAmount, sales, returns, payments) {
+  const events = [];
+
+  sales.forEach((sale) => {
+    events.push({
+      type: 'sale',
+      at: eventTimestamp(sale.invoiceDate, sale.createdAt),
+      createdAt: sale.createdAt,
+      amount: sale.totalAmount,
+    });
+  });
+
+  returns.forEach((item) => {
+    events.push({
+      type: 'return',
+      at: eventTimestamp(item.returnDate, item.createdAt),
+      createdAt: item.createdAt,
+      amount: item.totalReturnAmount,
+    });
+  });
+
+  payments.forEach((item) => {
+    events.push({
+      type: item.paymentType === 'refund' ? 'refund' : 'receive',
+      at: eventTimestamp(item.paymentDate, item.createdAt),
+      createdAt: item.createdAt,
+      amount: item.paymentAmount,
+      id: String(item._id),
+      skip: item.paymentStatus === 'pending',
+    });
+  });
+
+  events.sort((left, right) => left.at - right.at || new Date(left.createdAt || 0) - new Date(right.createdAt || 0));
+
+  let running = roundMoney(openingBalanceAmount);
+  const balanceAfterById = {};
+
+  events.forEach((event) => {
+    if (event.skip) {
+      if (event.id) balanceAfterById[event.id] = running;
+      return;
+    }
+    if (event.type === 'sale' || event.type === 'refund') {
+      running = roundMoney(running + event.amount);
+    } else {
+      running = roundMoney(running - event.amount);
+    }
+    if (event.id) balanceAfterById[event.id] = running;
+  });
+
+  return balanceAfterById;
+}
+
+function toCustomerLedgerProfile(customer) {
+  return {
+    _id: customer._id,
+    customerCode: customer.customerCode,
+    customerName: customer.customerName,
+    contactPersonName: customer.contactPersonName || '',
+    phoneNumber: customer.phoneNumber || '',
+    emailAddress: customer.emailAddress || '',
+    billingAddress: customer.billingAddress || '',
+    taxRegistrationNumber: customer.taxRegistrationNumber || '',
+    isActive: customer.isActive !== false,
+    accountStatus: customer.isActive !== false ? 'Active Account' : 'Inactive Account',
+    creditLimitAmount: roundMoney(customer.creditLimitAmount),
+    paymentTermDays: customer.paymentTermDays || 0,
+    openingBalanceAmount: roundMoney(customer.openingBalanceAmount),
+  };
+}
+
+async function getCustomerLedger(customerId) {
+  const customer = await loadCustomerForLedger(customerId);
+  const saleMatch = { customerId: customer._id, ...activeSaleMatch() };
+  const paymentMatch = {
+    customerId: customer._id,
+    paymentType: { $in: ['receive', 'refund'] },
+    paymentStatus: { $ne: 'pending' },
+  };
+
+  const [purchaseRow, outstandingBalance, lastPayment] = await Promise.all([
+    Sale.aggregate([
+      { $match: saleMatch },
+      { $group: { _id: null, total: { $sum: '$totalAmount' }, count: { $sum: 1 } } },
+    ]),
+    customerLedgerOutstanding(customer._id),
+    Payment.findOne(paymentMatch)
+      .sort({ paymentDate: -1, createdAt: -1 })
+      .select('paymentNumber paymentAmount paymentDate paymentMethod')
+      .lean(),
+  ]);
+
+  return {
+    customer: toCustomerLedgerProfile(customer),
+    summary: {
+      totalPurchases: roundMoney(purchaseRow[0]?.total),
+      salesCount: purchaseRow[0]?.count || 0,
+      outstandingBalance,
+      lastPaymentAmount: lastPayment ? roundMoney(lastPayment.paymentAmount) : 0,
+      lastPaymentDate: lastPayment?.paymentDate || null,
+      lastPaymentNumber: lastPayment?.paymentNumber || null,
+      lastPaymentMethod: lastPayment?.paymentMethod || null,
+      lastPaymentMethodLabel: lastPayment ? paymentMethodLabel(lastPayment.paymentMethod) : null,
+      creditLimitAmount: roundMoney(customer.creditLimitAmount),
+    },
+  };
+}
+
+async function getCustomerSalesHistory(customerId, query = {}) {
+  await loadCustomerForLedger(customerId);
+  const { page, limit, skip } = parsePagination(query);
+  const filter = await buildSaleListFilter({ ...query, customerId });
+  const findQuery = populateQuery(
+    Sale.find(filter).sort({ invoiceDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+    SALE_POPULATE
+  );
+  const [items, total] = await Promise.all([
+    findQuery.lean(),
+    Sale.countDocuments(filter),
+  ]);
+
+  return paginated(await attachReceiptAccounts(items.map(toSaleItem)), total, page, limit);
+}
+
+async function getCustomerPaymentHistory(customerId, query = {}) {
+  const customer = await loadCustomerForLedger(customerId);
+  const { page, limit, skip } = parsePagination(query);
+  const filter = applyDateRange(
+    { customerId: customer._id, paymentType: { $in: ['receive', 'refund'] } },
+    'paymentDate',
+    query
+  );
+  if (query.paymentStatus || query.status) {
+    filter.paymentStatus = query.paymentStatus || query.status;
+  }
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    filter.$or = [{ paymentNumber: regex }, { referenceNumber: regex }, { remarks: regex }];
+  }
+
+  const [pageDocs, total, sales, returns, allPayments] = await Promise.all([
+    populateQuery(
+      Payment.find(filter).sort({ paymentDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+      PAYMENT_POPULATE
+    ).lean(),
+    Payment.countDocuments(filter),
+    Sale.find({ customerId: customer._id, ...activeSaleMatch() })
+      .select('totalAmount invoiceDate createdAt')
+      .lean(),
+    SalesReturn.find({ customerId: customer._id }).select('totalReturnAmount returnDate createdAt').lean(),
+    Payment.find({ customerId: customer._id, paymentType: { $in: ['receive', 'refund'] } })
+      .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
+      .lean(),
+  ]);
+
+  const balanceAfterById = computePaymentBalanceAfter(
+    customer.openingBalanceAmount,
+    sales,
+    returns,
+    allPayments
+  );
+
+  const items = pageDocs.map((doc) => {
+    const item = toPaymentItem(doc);
+    const invoices = item.allocations.map((line) => line.invoiceNumber).filter(Boolean);
+    return {
+      ...item,
+      receiptNumber: item.paymentNumber,
+      appliedToInvoice: invoices.join(', '),
+      appliedToInvoices: invoices,
+      balanceAfter: balanceAfterById[String(doc._id)] ?? null,
+    };
+  });
+
+  return paginated(items, total, page, limit);
+}
+
 const sale = {
   create: createSale,
   list: listSales,
@@ -2105,5 +2294,10 @@ const expense = {
   remove: removeExpense,
   getFormOptions: getExpenseFormOptions,
 };
+const customerLedger = {
+  getSummary: getCustomerLedger,
+  listSales: getCustomerSalesHistory,
+  listPayments: getCustomerPaymentHistory,
+};
 
-module.exports = { sale, salesReturn, payment, expense };
+module.exports = { sale, salesReturn, payment, expense, customerLedger };

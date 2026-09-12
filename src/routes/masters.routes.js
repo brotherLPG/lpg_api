@@ -1,13 +1,35 @@
 const { createMasterController } = require('../controllers/master.controller');
 const { createMasterRouter } = require('./master.router');
+const authorize = require('../middlewares/authorize');
+const validate = require('../middlewares/validate');
 const masters = require('../services/masters.service');
 const schemas = require('../validations/master.validation');
+const { customerLedgerController } = require('../controllers/finance.controller');
 
 const customers = createMasterRouter({
   moduleName: 'customers',
   controller: createMasterController(masters.customer, { singular: 'Customer', plural: 'Customers' }),
   schemas: schemas.customer,
 });
+
+customers.get(
+  '/:id/ledger',
+  authorize('customers.read'),
+  validate(schemas.customer.idParam),
+  customerLedgerController.getLedger
+);
+customers.get(
+  '/:id/sales-history',
+  authorize('customers.read'),
+  validate(schemas.customer.history),
+  customerLedgerController.salesHistory
+);
+customers.get(
+  '/:id/payment-history',
+  authorize('customers.read'),
+  validate(schemas.customer.history),
+  customerLedgerController.paymentHistory
+);
 
 const suppliers = createMasterRouter({
   moduleName: 'suppliers',
