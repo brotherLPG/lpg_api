@@ -1,7 +1,7 @@
 const { createMasterController } = require('./master.controller');
 const asyncHandler = require('../utils/asyncHandler');
 const { send } = require('../utils/apiResponse');
-const { sale, salesReturn, payment, expense, customerLedger } = require('../services/finance.service');
+const { sale, salesReturn, payment, expense, customerLedger, supplierLedger } = require('../services/finance.service');
 
 const saleController = createMasterController(sale, { singular: 'Sale', plural: 'Sales' });
 const salesReturnController = createMasterController(salesReturn, {
@@ -28,10 +28,28 @@ const customerLedgerController = {
   }),
 };
 
+const supplierLedgerController = {
+  getLedger: asyncHandler(async (req, res) => {
+    const data = await supplierLedger.getSummary(req.params.id);
+    send(res, 200, 'Supplier ledger fetched', data);
+  }),
+  purchaseHistory: asyncHandler(async (req, res) => {
+    const query = req.validated?.query || req.query;
+    const data = await supplierLedger.listPurchases(req.params.id, query);
+    send(res, 200, 'Supplier purchase history fetched', data);
+  }),
+  paymentHistory: asyncHandler(async (req, res) => {
+    const query = req.validated?.query || req.query;
+    const data = await supplierLedger.listPayments(req.params.id, query);
+    send(res, 200, 'Supplier payment history fetched', data);
+  }),
+};
+
 module.exports = {
   saleController,
   salesReturnController,
   paymentController,
   expenseController,
   customerLedgerController,
+  supplierLedgerController,
 };

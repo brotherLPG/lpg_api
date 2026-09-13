@@ -252,7 +252,7 @@ function createSchema(bodyShape) {
   return z.object({ body: z.object(bodyShape) });
 }
 
-const customerHistoryQuery = z.object({
+const partyHistoryQuery = z.object({
   params: z.object({ id: objectId }),
   query: paginationQuery.extend({
     search: z.string().optional(),
@@ -268,7 +268,7 @@ const customer = {
   update: createUpdateSchema(customerBody),
   list: listMasterQuery(),
   idParam: idParamSchema,
-  history: customerHistoryQuery,
+  history: partyHistoryQuery,
 };
 
 const supplier = {
@@ -276,6 +276,7 @@ const supplier = {
   update: createUpdateSchema(supplierBody),
   list: listMasterQuery(),
   idParam: idParamSchema,
+  history: partyHistoryQuery,
 };
 
 const cylinderType = {

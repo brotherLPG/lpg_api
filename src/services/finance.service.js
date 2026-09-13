@@ -60,6 +60,13 @@ const EXPENSE_POPULATE = [
   { path: 'approvedByUserId', select: 'fullName emailAddress' },
 ];
 
+const LPG_RECEIPT_POPULATE = [
+  { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber city isActive' },
+  { path: 'storageTankId', select: 'tankCode tankName capacityKg currentQuantityKg tankStatus' },
+  { path: 'receivedByUserId', select: 'fullName emailAddress' },
+  { path: 'receivedByEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
+];
+
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
@@ -2300,4 +2307,224 @@ const customerLedger = {
   listPayments: getCustomerPaymentHistory,
 };
 
-module.exports = { sale, salesReturn, payment, expense, customerLedger };
+async function loadSupplierForLedger(supplierId) {
+  const supplier = await Supplier.findById(supplierId).lean();
+  if (!supplier) {
+    throw new ApiError(404, 'Supplier not found');
+  }
+  return supplier;
+}
+
+function computeSupplierPaymentBalanceAfter(openingBalanceAmount, purchases, payments) {
+  const events = [];
+
+  purchases.forEach((purchase) => {
+    if (purchase.receiptStatus === 'pending') return;
+    events.push({
+      type: 'purchase',
+      at: eventTimestamp(purchase.receivedAt, purchase.createdAt),
+      createdAt: purchase.createdAt,
+      amount: purchase.totalPurchaseAmount,
+    });
+  });
+
+  payments.forEach((item) => {
+    events.push({
+      type: 'pay',
+      at: eventTimestamp(item.paymentDate, item.createdAt),
+      createdAt: item.createdAt,
+      amount: item.paymentAmount,
+      id: String(item._id),
+      skip: item.paymentStatus === 'pending',
+    });
+  });
+
+  events.sort((left, right) => left.at - right.at || new Date(left.createdAt || 0) - new Date(right.createdAt || 0));
+
+  let running = roundMoney(openingBalanceAmount);
+  const balanceAfterById = {};
+
+  events.forEach((event) => {
+    if (event.skip) {
+      if (event.id) balanceAfterById[event.id] = running;
+      return;
+    }
+    running = event.type === 'purchase'
+      ? roundMoney(running + event.amount)
+      : roundMoney(running - event.amount);
+    if (event.id) balanceAfterById[event.id] = running;
+  });
+
+  return balanceAfterById;
+}
+
+function toSupplierLedgerProfile(supplier) {
+  return {
+    _id: supplier._id,
+    supplierCode: supplier.supplierCode,
+    supplierName: supplier.supplierName,
+    contactPersonName: supplier.contactPersonName || '',
+    phoneNumber: supplier.phoneNumber || '',
+    emailAddress: supplier.emailAddress || '',
+    businessAddress: supplier.businessAddress || '',
+    city: supplier.city || '',
+    stateProvince: supplier.stateProvince || '',
+    taxRegistrationNumber: supplier.taxRegistrationNumber || '',
+    isActive: supplier.isActive !== false,
+    accountStatus: supplier.isActive !== false ? 'Active Account' : 'Inactive Account',
+    creditLimitAmount: roundMoney(supplier.creditLimitAmount),
+    paymentTermDays: supplier.paymentTermDays || 0,
+    openingBalanceAmount: roundMoney(supplier.openingBalanceAmount),
+  };
+}
+
+function toSupplierPurchaseItem(doc) {
+  const tank = doc.storageTankId && doc.storageTankId.tankCode ? doc.storageTankId : null;
+  const receiptStatus = doc.receiptStatus || 'confirmed';
+  return {
+    _id: doc._id,
+    receiptNumber: doc.receiptNumber,
+    supplierInvoiceNumber: doc.supplierInvoiceNumber || '',
+    receivedAt: doc.receivedAt,
+    truckRegistrationNumber: doc.truckRegistrationNumber || '',
+    receivedQuantityKg: doc.receivedQuantityKg,
+    purchaseRatePerKg: roundMoney(doc.purchaseRatePerKg),
+    totalPurchaseAmount: roundMoney(doc.totalPurchaseAmount),
+    receiptStatus,
+    storageTankId: tank?._id || doc.storageTankId || null,
+    tankCode: tank?.tankCode || '',
+    tankName: tank?.tankName || '',
+    remarks: doc.remarks || '',
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+async function getSupplierLedger(supplierId) {
+  const supplier = await loadSupplierForLedger(supplierId);
+  const purchaseMatch = { supplierId: supplier._id, receiptStatus: 'confirmed' };
+  const paymentMatch = {
+    supplierId: supplier._id,
+    paymentType: 'pay',
+    paymentStatus: { $ne: 'pending' },
+  };
+
+  const [purchaseRow, outstandingBalance, lastPayment] = await Promise.all([
+    LPGReceipt.aggregate([
+      { $match: purchaseMatch },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$totalPurchaseAmount' },
+          quantityKg: { $sum: '$receivedQuantityKg' },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    supplierLedgerOutstanding(supplier._id),
+    Payment.findOne(paymentMatch)
+      .sort({ paymentDate: -1, createdAt: -1 })
+      .select('paymentNumber paymentAmount paymentDate paymentMethod')
+      .lean(),
+  ]);
+
+  return {
+    supplier: toSupplierLedgerProfile(supplier),
+    summary: {
+      totalPurchases: roundMoney(purchaseRow[0]?.total),
+      purchaseCount: purchaseRow[0]?.count || 0,
+      totalQuantityKg: roundMoney(purchaseRow[0]?.quantityKg),
+      outstandingBalance,
+      lastPaymentAmount: lastPayment ? roundMoney(lastPayment.paymentAmount) : 0,
+      lastPaymentDate: lastPayment?.paymentDate || null,
+      lastPaymentNumber: lastPayment?.paymentNumber || null,
+      lastPaymentMethod: lastPayment?.paymentMethod || null,
+      lastPaymentMethodLabel: lastPayment ? paymentMethodLabel(lastPayment.paymentMethod) : null,
+      creditLimitAmount: roundMoney(supplier.creditLimitAmount),
+    },
+  };
+}
+
+async function getSupplierPurchaseHistory(supplierId, query = {}) {
+  await loadSupplierForLedger(supplierId);
+  const { page, limit, skip } = parsePagination(query);
+  const filter = applyDateRange({ supplierId }, 'receivedAt', query);
+  if (query.receiptStatus) filter.receiptStatus = query.receiptStatus;
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    filter.$or = [
+      { receiptNumber: regex },
+      { supplierInvoiceNumber: regex },
+      { truckRegistrationNumber: regex },
+      { remarks: regex },
+    ];
+  }
+
+  const findQuery = populateQuery(
+    LPGReceipt.find(filter).sort({ receivedAt: -1, createdAt: -1 }).skip(skip).limit(limit),
+    LPG_RECEIPT_POPULATE
+  );
+  const [items, total] = await Promise.all([
+    findQuery.lean(),
+    LPGReceipt.countDocuments(filter),
+  ]);
+
+  return paginated(items.map(toSupplierPurchaseItem), total, page, limit);
+}
+
+async function getSupplierPaymentHistory(supplierId, query = {}) {
+  const supplier = await loadSupplierForLedger(supplierId);
+  const { page, limit, skip } = parsePagination(query);
+  const filter = applyDateRange(
+    { supplierId: supplier._id, paymentType: 'pay' },
+    'paymentDate',
+    query
+  );
+  if (query.paymentStatus || query.status) {
+    filter.paymentStatus = query.paymentStatus || query.status;
+  }
+  if (query.search) {
+    const regex = { $regex: query.search.trim(), $options: 'i' };
+    filter.$or = [{ paymentNumber: regex }, { referenceNumber: regex }, { remarks: regex }];
+  }
+
+  const [pageDocs, total, purchases, allPayments] = await Promise.all([
+    populateQuery(
+      Payment.find(filter).sort({ paymentDate: -1, createdAt: -1 }).skip(skip).limit(limit),
+      PAYMENT_POPULATE
+    ).lean(),
+    Payment.countDocuments(filter),
+    LPGReceipt.find({ supplierId: supplier._id, receiptStatus: 'confirmed' })
+      .select('totalPurchaseAmount receivedAt receiptStatus createdAt')
+      .lean(),
+    Payment.find({ supplierId: supplier._id, paymentType: 'pay' })
+      .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
+      .lean(),
+  ]);
+
+  const balanceAfterById = computeSupplierPaymentBalanceAfter(
+    supplier.openingBalanceAmount,
+    purchases,
+    allPayments
+  );
+
+  const items = pageDocs.map((doc) => {
+    const item = toPaymentItem(doc);
+    return {
+      ...item,
+      receiptNumber: item.paymentNumber,
+      appliedToInvoice: item.referenceNumber || '',
+      balanceAfter: balanceAfterById[String(doc._id)] ?? null,
+    };
+  });
+
+  return paginated(items, total, page, limit);
+}
+
+const supplierLedger = {
+  getSummary: getSupplierLedger,
+  listPurchases: getSupplierPurchaseHistory,
+  listPayments: getSupplierPaymentHistory,
+};
+
+module.exports = { sale, salesReturn, payment, expense, customerLedger, supplierLedger };
