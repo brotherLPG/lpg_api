@@ -385,6 +385,7 @@ function mapAccountOption(account) {
     accountName: account.accountName,
     accountType: account.accountType,
     isPrimary: Boolean(account.isPrimary),
+    currentBalanceAmount: roundMoney(account.currentBalanceAmount),
     label: accountLabel(account),
   };
 }
@@ -1178,10 +1179,7 @@ async function getPaymentFormOptions(query = {}) {
     nextPaymentNumber(),
     Customer.find({ isActive: true }).select('customerCode customerName phoneNumber').sort({ customerName: 1 }).lean(),
     Supplier.find({ isActive: true }).select('supplierCode supplierName phoneNumber').sort({ supplierName: 1 }).lean(),
-    Account.find({ isActive: true, accountType: { $in: ['cash', 'bank'] } })
-      .select('accountCode accountName accountType isPrimary currentBalanceAmount')
-      .sort({ isPrimary: -1, accountName: 1 })
-      .lean(),
+    loadActiveAccounts(),
   ]);
 
   let ledgerBalance = 0;
@@ -1218,14 +1216,7 @@ async function getPaymentFormOptions(query = {}) {
       supplierName: supplier.supplierName,
       label: `${supplier.supplierCode} – ${supplier.supplierName}`,
     })),
-    accounts: accounts.map((account) => ({
-      _id: account._id,
-      accountCode: account.accountCode,
-      accountName: account.accountName,
-      accountType: account.accountType,
-      isPrimary: Boolean(account.isPrimary),
-      label: `${account.accountCode} – ${account.accountName}`,
-    })),
+    accounts: accounts.map(mapAccountOption),
   };
 }
 
