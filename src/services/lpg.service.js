@@ -7,13 +7,20 @@ const {
   CylinderType,
   InventoryItem,
   Employee,
+  Payment,
 } = require('../models');
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
-const { RECEIPT_STATUSES, BATCH_STATUSES } = require('../constants/masters');
+const { receiptFinance } = require('./finance.service');
+const {
+  RECEIPT_STATUSES,
+  BATCH_STATUSES,
+  PAYMENT_METHOD_OPTIONS,
+  PAYMENT_STATUS_OPTIONS,
+} = require('../constants/masters');
 
 const RECEIPT_POPULATE = [
   { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber city isActive' },
@@ -35,6 +42,41 @@ function roundMoney(value) {
 
 function computePurchaseAmount(quantityKg, rate) {
   return roundMoney(quantityKg * (rate || 0));
+}
+
+function paymentStatusLabel(status) {
+  return PAYMENT_STATUS_OPTIONS.find((item) => item.value === status)?.label || status || 'Unpaid';
+}
+
+function paymentMethodLabel(value) {
+  return PAYMENT_METHOD_OPTIONS.find((item) => item.value === value)?.label || value || '';
+}
+
+function pickReceiptAccountId(body) {
+  const raw = body?.accountId || body?.paymentAccountId || body?.paidFromAccountId || body?.payment?.accountId;
+  if (!raw) return null;
+  if (typeof raw === 'object' && raw._id) return raw._id;
+  return raw;
+}
+
+function pickReceiptPaymentMethod(body) {
+  return body?.paymentMethod || body?.payment?.paymentMethod;
+}
+
+function pickReceiptReferenceNumber(body) {
+  if (body?.referenceNumber !== undefined) return body.referenceNumber;
+  if (body?.payment?.referenceNumber !== undefined) return body.payment.referenceNumber;
+  return undefined;
+}
+
+function pickReceiptAmountPaid(body, fallback = 0) {
+  if (body?.amountPaid !== undefined) return roundMoney(body.amountPaid);
+  if (body?.payment?.paymentAmount !== undefined) return roundMoney(body.payment.paymentAmount);
+  return roundMoney(fallback);
+}
+
+function receiptPaymentBalances(totalAmount, paidAmount) {
+  return receiptFinance.deriveBalances(totalAmount, paidAmount, 0);
 }
 
 function applyDateRange(filter, field, query) {
@@ -96,6 +138,16 @@ function toReceiptItem(doc) {
     receivedQuantityKg: doc.receivedQuantityKg,
     purchaseRatePerKg: doc.purchaseRatePerKg || 0,
     totalPurchaseAmount: doc.totalPurchaseAmount || 0,
+    paidAmount: roundMoney(doc.paidAmount || 0),
+    outstandingAmount: roundMoney(
+      doc.outstandingAmount
+      ?? ((doc.totalPurchaseAmount || 0) - (doc.paidAmount || 0))
+    ),
+    paymentStatus: doc.paymentStatus || 'unpaid',
+    paymentStatusLabel: paymentStatusLabel(doc.paymentStatus || 'unpaid'),
+    paymentMethod: doc.paymentMethod || '',
+    paymentMethodLabel: doc.paymentMethod ? paymentMethodLabel(doc.paymentMethod) : '',
+    referenceNumber: doc.referenceNumber || '',
     receiptStatus,
     receiptStatusLabel: receiptStatusLabel(receiptStatus),
     supplierInvoiceNumber: doc.supplierInvoiceNumber || '',
@@ -210,6 +262,9 @@ function invalidateOps() {
   cache.delByPrefix('inventory-items:');
   cache.delByPrefix('lpg-receipts:');
   cache.delByPrefix('filling-batches:');
+  cache.delByPrefix('payments:');
+  cache.delByPrefix('suppliers:');
+  cache.delByPrefix('accounts:');
 }
 
 async function withTransaction(work) {
@@ -354,8 +409,8 @@ function populateQuery(query, paths) {
   return query;
 }
 
-async function getReceiptFormOptions() {
-  const [suppliers, employees, tank, nextReceiptNumber] = await Promise.all([
+async function getReceiptFormOptions(query = {}) {
+  const [suppliers, employees, tank, nextReceiptNumber, accounts] = await Promise.all([
     Supplier.find({ isActive: true }).select('supplierCode supplierName contactPersonName').sort({ supplierName: 1 }).lean(),
     Employee.find({ employmentStatus: { $ne: 'terminated' } })
       .select('employeeCode fullName jobTitle employmentStatus')
@@ -363,14 +418,30 @@ async function getReceiptFormOptions() {
       .lean(),
     StorageTank.findOne().sort({ createdAt: 1 }).lean(),
     nextSequentialCode(LPGReceipt, 'receiptNumber', 'RCP'),
+    receiptFinance.loadActiveAccounts(),
   ]);
 
   if (!tank) {
     throw new ApiError(400, 'No storage tank is configured');
   }
 
+  let ledgerBalance = 0;
+  let outstandingReceipts = [];
+  if (query.supplierId) {
+    [ledgerBalance, outstandingReceipts] = await Promise.all([
+      receiptFinance.supplierLedgerOutstanding(query.supplierId),
+      receiptFinance.outstandingReceiptsForSupplier(query.supplierId),
+    ]);
+  }
+
   return {
     nextReceiptNumber,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
+    paymentStatuses: PAYMENT_STATUS_OPTIONS,
+    statuses: RECEIPT_STATUSES,
+    ledgerBalance,
+    ledgerBalanceLabel: query.supplierId ? `Rs. ${roundMoney(ledgerBalance).toLocaleString('en-US')} Outstanding` : '',
+    outstandingReceipts,
     suppliers: suppliers.map((supplier) => ({
       _id: supplier._id,
       supplierCode: supplier.supplierCode,
@@ -392,6 +463,7 @@ async function getReceiptFormOptions() {
       availableCapacityKg: roundMoney((tank.capacityKg || 0) - (tank.currentQuantityKg || 0)),
       tankStatus: tank.tankStatus,
     },
+    accounts: accounts.map(receiptFinance.mapAccountOption),
   };
 }
 
@@ -444,15 +516,19 @@ async function getFillingFormOptions() {
 }
 
 async function getReceiptById(id) {
-  const [doc, form] = await Promise.all([
-    populateQuery(LPGReceipt.findById(id), RECEIPT_POPULATE),
-    getReceiptFormOptions(),
-  ]);
+  const doc = await populateQuery(LPGReceipt.findById(id), RECEIPT_POPULATE);
   if (!doc) {
     throw new ApiError(404, 'LPGReceipt not found');
   }
+  const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  const [receipt] = await receiptFinance.attachReceiptPaymentAccounts([toReceiptItem(plain)]);
+  const [form, balances] = await Promise.all([
+    getReceiptFormOptions({ supplierId: receipt.supplierId }),
+    receiptFinance.supplierBalancesForReceipt(receipt.supplierId, receipt._id, receipt.receiptStatus),
+  ]);
   return {
-    ...toReceiptItem(doc),
+    ...receipt,
+    ...balances,
     form,
   };
 }
@@ -473,9 +549,11 @@ async function getFillingById(id) {
 
 async function listReceipts(query) {
   const { page, limit, skip } = parsePagination(query);
+  await receiptFinance.backfillReceiptPaymentBalances();
   const filter = applyDateRange({}, 'receivedAt', query);
   if (query.supplierId) filter.supplierId = query.supplierId;
   if (query.storageTankId) filter.storageTankId = query.storageTankId;
+  if (query.paymentStatus) filter.paymentStatus = query.paymentStatus;
   if (query.receiptStatus === 'pending') {
     filter.receiptStatus = 'pending';
   } else if (query.receiptStatus === 'confirmed') {
@@ -501,7 +579,7 @@ async function listReceipts(query) {
     RECEIPT_POPULATE
   );
 
-  const [items, total, monthAgg, pendingReceipts, suppliers] = await Promise.all([
+  const [items, total, monthAgg, pendingReceipts, outstandingAgg, suppliers] = await Promise.all([
     findQuery.lean(),
     LPGReceipt.countDocuments(filter),
     LPGReceipt.aggregate([
@@ -516,21 +594,28 @@ async function listReceipts(query) {
       },
     ]),
     LPGReceipt.countDocuments({ receiptStatus: 'pending' }),
+    LPGReceipt.aggregate([
+      { $match: { receiptStatus: 'confirmed' } },
+      { $group: { _id: null, outstanding: { $sum: '$outstandingAmount' } } },
+    ]),
     Supplier.find({ isActive: true }).select('supplierCode supplierName').sort({ supplierName: 1 }).lean(),
   ]);
 
   const month = monthAgg[0] || { shipmentCount: 0, quantityKg: 0, purchaseCost: 0 };
+  const mapped = await receiptFinance.attachReceiptPaymentAccounts(items.map(toReceiptItem));
 
   return {
-    ...paginated(items.map(toReceiptItem), total, page, limit),
+    ...paginated(mapped, total, page, limit),
     summary: {
       thisMonthReceipts: month.shipmentCount || 0,
       thisMonthQuantityKg: roundMoney(month.quantityKg || 0),
       thisMonthPurchaseCost: roundMoney(month.purchaseCost || 0),
       pendingReceipts,
+      outstandingPurchaseAmount: roundMoney(outstandingAgg[0]?.outstanding),
     },
     meta: {
       statuses: RECEIPT_STATUSES,
+      paymentStatuses: PAYMENT_STATUS_OPTIONS,
       suppliers: suppliers.map((supplier) => ({
         _id: supplier._id,
         supplierCode: supplier.supplierCode,
@@ -626,6 +711,12 @@ async function createReceipt(body, req) {
     const receivedQuantityKg = body.receivedQuantityKg;
     const purchaseRatePerKg = body.purchaseRatePerKg;
     const receiptStatus = resolveReceiptStatus(body, 'confirmed');
+    const totalPurchaseAmount = computePurchaseAmount(receivedQuantityKg, purchaseRatePerKg);
+    const amountPaid = pickReceiptAmountPaid(body, 0);
+    if (amountPaid > totalPurchaseAmount) {
+      throw new ApiError(400, 'Amount paid cannot exceed purchase total');
+    }
+    const balances = receiptPaymentBalances(totalPurchaseAmount, amountPaid);
     const quantityBeforeKg = tank.currentQuantityKg || 0;
     const payload = {
       receiptNumber,
@@ -633,7 +724,12 @@ async function createReceipt(body, req) {
       storageTankId: tank._id,
       receivedQuantityKg,
       purchaseRatePerKg,
-      totalPurchaseAmount: computePurchaseAmount(receivedQuantityKg, purchaseRatePerKg),
+      totalPurchaseAmount,
+      paidAmount: amountPaid,
+      outstandingAmount: balances.outstandingAmount,
+      paymentStatus: balances.paymentStatus,
+      paymentMethod: pickReceiptPaymentMethod(body),
+      referenceNumber: pickReceiptReferenceNumber(body) || '',
       truckRegistrationNumber: body.truckRegistrationNumber,
       receivedAt: body.receivedAt || new Date(),
       supplierInvoiceNumber: body.supplierInvoiceNumber,
@@ -648,6 +744,18 @@ async function createReceipt(body, req) {
     if (receiptStatus === 'confirmed') {
       const updatedTank = await incrementTank(tank._id, receivedQuantityKg, session);
       quantityAfterKg = updatedTank.currentQuantityKg;
+      if (amountPaid > 0) {
+        await receiptFinance.postSupplierPayment({
+          receipt: doc,
+          supplierId: body.supplierId,
+          amount: amountPaid,
+          accountId: pickReceiptAccountId(body),
+          paymentMethod: pickReceiptPaymentMethod(body),
+          paymentDate: payload.receivedAt,
+          referenceNumber: payload.referenceNumber,
+          userId: req.user._id,
+        }, session);
+      }
     }
 
     await writeAudit({
@@ -704,18 +812,37 @@ async function updateReceipt(id, body, req) {
     const nextRate = body.purchaseRatePerKg ?? existing.purchaseRatePerKg;
     const previousStatus = receiptStatusOf(existing);
     const nextStatus = resolveReceiptStatus(body, previousStatus);
+    const nextTotal = computePurchaseAmount(nextQty, nextRate);
+    const wantsAmountPaid = body.amountPaid !== undefined || body.payment?.paymentAmount !== undefined;
+    const nextPaidAmount = wantsAmountPaid
+      ? pickReceiptAmountPaid(body, existing.paidAmount || 0)
+      : roundMoney(existing.paidAmount || 0);
 
     if (String(nextSupplierId) !== String(existing.supplierId)) {
+      if ((existing.paidAmount || 0) > 0) {
+        throw new ApiError(400, 'Cannot change supplier on a receipt that has payments');
+      }
       await assertSupplier(nextSupplierId, session);
     }
     if (body.receivedByEmployeeId && String(body.receivedByEmployeeId) !== String(existing.receivedByEmployeeId)) {
       await assertEmployee(body.receivedByEmployeeId, session);
     }
 
+    if (nextPaidAmount > nextTotal) {
+      throw new ApiError(400, 'Amount paid cannot exceed purchase total');
+    }
+
     const qtyChanged = nextQty !== existing.receivedQuantityKg;
     const tankChanged = String(nextTankId) !== String(existing.storageTankId);
     const wasConfirmed = previousStatus === 'confirmed';
     const willConfirm = nextStatus === 'confirmed';
+
+    if (wasConfirmed && !willConfirm && (existing.paidAmount || 0) > 0) {
+      throw new ApiError(400, 'Cannot mark a paid LPG receipt as pending');
+    }
+    if (wasConfirmed && wantsAmountPaid) {
+      throw new ApiError(400, 'Record a supplier payment instead of changing amount paid on a confirmed receipt');
+    }
 
     if (wasConfirmed && willConfirm && (qtyChanged || tankChanged)) {
       await decrementTank(existing.storageTankId, existing.receivedQuantityKg, session);
@@ -732,6 +859,7 @@ async function updateReceipt(id, body, req) {
       receivedQuantityKg: existing.receivedQuantityKg,
       storageTankId: existing.storageTankId,
       purchaseRatePerKg: existing.purchaseRatePerKg,
+      paidAmount: existing.paidAmount,
     };
 
     existing.receiptNumber = body.receiptNumber || existing.receiptNumber;
@@ -739,14 +867,44 @@ async function updateReceipt(id, body, req) {
     existing.storageTankId = nextTankId;
     existing.receivedQuantityKg = nextQty;
     existing.purchaseRatePerKg = nextRate;
-    existing.totalPurchaseAmount = computePurchaseAmount(nextQty, nextRate);
+    existing.totalPurchaseAmount = nextTotal;
+    existing.paidAmount = nextPaidAmount;
+    const balances = receiptPaymentBalances(nextTotal, nextPaidAmount);
+    existing.outstandingAmount = balances.outstandingAmount;
+    existing.paymentStatus = balances.paymentStatus;
     existing.receiptStatus = nextStatus;
     if (body.receivedByEmployeeId !== undefined) existing.receivedByEmployeeId = body.receivedByEmployeeId;
     if (body.truckRegistrationNumber !== undefined) existing.truckRegistrationNumber = body.truckRegistrationNumber;
     if (body.receivedAt !== undefined) existing.receivedAt = body.receivedAt;
     if (body.supplierInvoiceNumber !== undefined) existing.supplierInvoiceNumber = body.supplierInvoiceNumber;
     if (body.remarks !== undefined) existing.remarks = body.remarks;
+    if (body.paymentMethod !== undefined || body.payment?.paymentMethod !== undefined) {
+      existing.paymentMethod = pickReceiptPaymentMethod(body);
+    }
+    if (body.referenceNumber !== undefined || body.payment?.referenceNumber !== undefined) {
+      existing.referenceNumber = pickReceiptReferenceNumber(body) || '';
+    }
     await existing.save({ session });
+
+    if (!wasConfirmed && willConfirm && nextPaidAmount > 0) {
+      const alreadyPaid = await Payment.countDocuments({
+        paymentType: 'pay',
+        lpgReceiptId: existing._id,
+        paymentStatus: { $ne: 'pending' },
+      }).session(session);
+      if (!alreadyPaid) {
+        await receiptFinance.postSupplierPayment({
+          receipt: existing,
+          supplierId: nextSupplierId,
+          amount: nextPaidAmount,
+          accountId: pickReceiptAccountId(body),
+          paymentMethod: pickReceiptPaymentMethod(body) || existing.paymentMethod,
+          paymentDate: existing.receivedAt,
+          referenceNumber: pickReceiptReferenceNumber(body) ?? existing.referenceNumber,
+          userId: req.user._id,
+        }, session);
+      }
+    }
 
     await writeAudit({
       req,

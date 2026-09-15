@@ -6,7 +6,12 @@ const allocationSchema = new mongoose.Schema(
     saleId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Sale',
-      required: true,
+      default: null,
+    },
+    lpgReceiptId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'LPGReceipt',
+      default: null,
     },
     amountApplied: {
       type: Number,
@@ -64,6 +69,11 @@ const paymentSchema = new mongoose.Schema(
       ref: 'Sale',
       default: null,
     },
+    lpgReceiptId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'LPGReceipt',
+      default: null,
+    },
     allocations: {
       type: [allocationSchema],
       default: [],
@@ -87,6 +97,7 @@ const paymentSchema = new mongoose.Schema(
 paymentSchema.index({ customerId: 1, paymentDate: -1 });
 paymentSchema.index({ supplierId: 1, paymentDate: -1 });
 paymentSchema.index({ saleId: 1 });
+paymentSchema.index({ lpgReceiptId: 1 });
 paymentSchema.index({ accountId: 1, paymentDate: -1 });
 paymentSchema.index({ paymentType: 1, paymentStatus: 1 });
 

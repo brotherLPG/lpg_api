@@ -50,7 +50,9 @@ const PAYMENT_POPULATE = [
   { path: 'supplierId', select: 'supplierCode supplierName contactPersonName phoneNumber isActive' },
   { path: 'accountId', select: 'accountCode accountName accountType currentBalanceAmount' },
   { path: 'saleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount paymentStatus' },
+  { path: 'lpgReceiptId', select: 'receiptNumber supplierInvoiceNumber totalPurchaseAmount paidAmount outstandingAmount paymentStatus' },
   { path: 'allocations.saleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount paymentStatus' },
+  { path: 'allocations.lpgReceiptId', select: 'receiptNumber supplierInvoiceNumber totalPurchaseAmount paidAmount outstandingAmount paymentStatus' },
   { path: 'receivedOrPaidByUserId', select: 'fullName emailAddress' },
 ];
 
@@ -137,10 +139,12 @@ function invalidateFinance() {
   cache.delByPrefix('inventory-items:');
   cache.delByPrefix('accounts:');
   cache.delByPrefix('customers:');
+  cache.delByPrefix('suppliers:');
   cache.delByPrefix('sales:');
   cache.delByPrefix('sales-returns:');
   cache.delByPrefix('payments:');
   cache.delByPrefix('expenses:');
+  cache.delByPrefix('lpg-receipts:');
 }
 
 async function withTransaction(work) {
@@ -543,6 +547,91 @@ async function applySalePayment(sale, paidDelta, session) {
   sale.paymentStatus = balances.paymentStatus;
   await sale.save({ session });
   return sale;
+}
+
+async function applyReceiptPayment(receipt, paidDelta, session) {
+  const paidAmount = roundMoney((receipt.paidAmount || 0) + paidDelta);
+  if (paidAmount < 0) {
+    throw new ApiError(400, 'Paid amount cannot be negative');
+  }
+  const balances = deriveBalances(receipt.totalPurchaseAmount, paidAmount, 0);
+  receipt.paidAmount = paidAmount;
+  receipt.outstandingAmount = balances.outstandingAmount;
+  receipt.paymentStatus = balances.paymentStatus;
+  await receipt.save({ session });
+  return receipt;
+}
+
+async function postSupplierPayment({
+  receipt,
+  supplierId,
+  amount,
+  accountId,
+  paymentMethod,
+  paymentDate,
+  referenceNumber,
+  userId,
+}, session) {
+  const account = await resolveReceiveAccount(accountId, session);
+  await changeAccount(account._id, -amount, session);
+  const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
+  await Payment.create(
+    [
+      {
+        paymentNumber,
+        paymentType: 'pay',
+        supplierId,
+        lpgReceiptId: receipt._id,
+        allocations: [{ lpgReceiptId: receipt._id, amountApplied: amount }],
+        accountId: account._id,
+        paymentAmount: amount,
+        paymentMethod: paymentMethodForAccount(account, paymentMethod),
+        paymentDate: resolveBusinessDate(paymentDate, receipt.receivedAt),
+        referenceNumber: referenceNumber || '',
+        receivedOrPaidByUserId: userId,
+      },
+    ],
+    { session }
+  );
+  return account;
+}
+
+async function backfillReceiptPaymentBalances(filter = {}) {
+  const docs = await LPGReceipt.find({
+    ...filter,
+    totalPurchaseAmount: { $gt: 0 },
+    $or: [
+      { paymentStatus: { $exists: false } },
+      { paymentStatus: null },
+      { paymentStatus: '' },
+      {
+        paymentStatus: 'unpaid',
+        $and: [
+          { $or: [{ paidAmount: { $exists: false } }, { paidAmount: 0 }, { paidAmount: null }] },
+          { $or: [{ outstandingAmount: { $exists: false } }, { outstandingAmount: 0 }, { outstandingAmount: null }] },
+        ],
+      },
+    ],
+  }).select('totalPurchaseAmount paidAmount outstandingAmount paymentStatus');
+  if (!docs.length) return;
+  await LPGReceipt.bulkWrite(
+    docs.map((doc) => {
+      const paidAmount = roundMoney(doc.paidAmount || 0);
+      const balances = deriveBalances(doc.totalPurchaseAmount || 0, paidAmount, 0);
+      return {
+        updateOne: {
+          filter: { _id: doc._id },
+          update: {
+            $set: {
+              paidAmount,
+              outstandingAmount: balances.outstandingAmount,
+              paymentStatus: balances.paymentStatus,
+            },
+          },
+        },
+      };
+    })
+  );
 }
 
 async function getSaleById(id) {
@@ -961,20 +1050,27 @@ function paymentAllocationsOf(doc) {
   if (doc.saleId) {
     return [{ saleId: doc.saleId, amountApplied: doc.paymentAmount }];
   }
+  if (doc.lpgReceiptId) {
+    return [{ lpgReceiptId: doc.lpgReceiptId, amountApplied: doc.paymentAmount }];
+  }
   return [];
 }
 
 function normalizeAllocations(body) {
   if (Array.isArray(body.allocations) && body.allocations.length) {
     return body.allocations
-      .filter((item) => item.saleId && Number(item.amountApplied) > 0)
+      .filter((item) => (item.saleId || item.lpgReceiptId) && Number(item.amountApplied) > 0)
       .map((item) => ({
-        saleId: item.saleId,
+        saleId: item.saleId || null,
+        lpgReceiptId: item.lpgReceiptId || null,
         amountApplied: roundMoney(item.amountApplied),
       }));
   }
   if (body.saleId) {
-    return [{ saleId: body.saleId, amountApplied: roundMoney(body.paymentAmount) }];
+    return [{ saleId: body.saleId, lpgReceiptId: null, amountApplied: roundMoney(body.paymentAmount) }];
+  }
+  if (body.lpgReceiptId) {
+    return [{ saleId: null, lpgReceiptId: body.lpgReceiptId, amountApplied: roundMoney(body.paymentAmount) }];
   }
   return [];
 }
@@ -999,11 +1095,18 @@ function toPaymentItem(doc) {
   const paymentStatus = doc.paymentStatus || 'recorded';
   const allocations = paymentAllocationsOf(doc).map((line) => {
     const sale = line.saleId && typeof line.saleId === 'object' ? line.saleId : null;
+    const receipt = line.lpgReceiptId && typeof line.lpgReceiptId === 'object' ? line.lpgReceiptId : null;
     return {
-      saleId: sale?._id || line.saleId,
+      saleId: sale?._id || line.saleId || null,
+      lpgReceiptId: receipt?._id || line.lpgReceiptId || null,
       invoiceNumber: sale?.invoiceNumber || '',
+      receiptNumber: receipt?.receiptNumber || '',
       amountApplied: roundMoney(line.amountApplied),
-      outstandingAmount: sale ? roundMoney(sale.outstandingAmount) : null,
+      outstandingAmount: sale
+        ? roundMoney(sale.outstandingAmount)
+        : receipt
+          ? roundMoney(receipt.outstandingAmount)
+          : null,
     };
   });
 
@@ -1028,6 +1131,8 @@ function toPaymentItem(doc) {
     paymentStatusLabel: paymentVoucherStatusLabel(paymentStatus),
     referenceNumber: doc.referenceNumber || '',
     remarks: doc.remarks || '',
+    saleId: doc.saleId?._id || doc.saleId || allocations[0]?.saleId || null,
+    lpgReceiptId: doc.lpgReceiptId?._id || doc.lpgReceiptId || allocations[0]?.lpgReceiptId || null,
     allocations,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -1123,20 +1228,90 @@ async function outstandingSalesForCustomer(customerId) {
   }));
 }
 
+async function outstandingReceiptsForSupplier(supplierId) {
+  await backfillReceiptPaymentBalances({ supplierId });
+  const receipts = await LPGReceipt.find({
+    supplierId,
+    receiptStatus: 'confirmed',
+    outstandingAmount: { $gt: 0 },
+  })
+    .select('receiptNumber supplierInvoiceNumber receivedAt totalPurchaseAmount outstandingAmount paidAmount')
+    .sort({ receivedAt: 1, createdAt: 1 })
+    .lean();
+
+  return receipts.map((receipt) => ({
+    _id: receipt._id,
+    receiptNumber: receipt.receiptNumber,
+    supplierInvoiceNumber: receipt.supplierInvoiceNumber || '',
+    invoiceNumber: receipt.receiptNumber,
+    receivedAt: receipt.receivedAt,
+    invoiceDate: receipt.receivedAt,
+    totalAmount: roundMoney(receipt.totalPurchaseAmount),
+    outstandingAmount: roundMoney(receipt.outstandingAmount),
+    paidAmount: roundMoney(receipt.paidAmount),
+    label: `${receipt.receiptNumber} – Outstanding ${formatRs(receipt.outstandingAmount)}`,
+  }));
+}
+
 function buildAllocationRemarks(allocations, invoices, paymentAmount) {
   if (!allocations.length) {
     return `${formatRs(paymentAmount)} recorded on account`;
   }
   return allocations.map((alloc) => {
-    const invoice = invoices.find((item) => String(item._id) === String(alloc.saleId));
-    const invoiceNumber = invoice?.invoiceNumber || 'invoice';
+    const targetId = alloc.saleId || alloc.lpgReceiptId;
+    const invoice = invoices.find((item) => String(item._id) === String(targetId));
+    const invoiceNumber = invoice?.invoiceNumber || invoice?.receiptNumber || 'document';
     const newBal = invoice ? roundMoney(invoice.outstandingAmount - alloc.amountApplied) : 0;
     return `${formatRs(alloc.amountApplied)} applied to ${invoiceNumber} (New Bal: ${formatRs(newBal)})`;
   }).join('; ');
 }
 
-async function loadAndValidateAllocations(allocations, { customerId, paymentAmount, paymentType }, session) {
+async function loadAndValidateAllocations(allocations, { customerId, supplierId, paymentAmount, paymentType }, session) {
   if (!allocations.length) return [];
+  if (paymentType === 'pay') {
+    const totalApplied = roundMoney(allocations.reduce((sum, item) => sum + item.amountApplied, 0));
+    if (totalApplied > paymentAmount) {
+      throw new ApiError(400, 'Allocated amount cannot exceed payment amount');
+    }
+
+    const loaded = [];
+    for (const alloc of allocations) {
+      const receiptId = alloc.lpgReceiptId;
+      if (!receiptId) {
+        throw new ApiError(400, 'lpgReceiptId is required for supplier payment allocations');
+      }
+      let receiptQuery = LPGReceipt.findById(receiptId);
+      if (session) receiptQuery = receiptQuery.session(session);
+      const receipt = await receiptQuery;
+      if (!receipt) throw new ApiError(400, 'Allocated LPG receipt not found');
+      if (receipt.receiptStatus === 'pending') {
+        throw new ApiError(400, 'Cannot allocate to a pending LPG receipt');
+      }
+      if (supplierId && String(receipt.supplierId) !== String(supplierId)) {
+        throw new ApiError(400, 'Allocated receipt does not belong to the selected supplier');
+      }
+      if (!receipt.paymentStatus
+        || (
+          receipt.paymentStatus === 'unpaid'
+          && roundMoney(receipt.paidAmount || 0) === 0
+          && roundMoney(receipt.outstandingAmount || 0) === 0
+          && roundMoney(receipt.totalPurchaseAmount || 0) > 0
+        )
+      ) {
+        const paidAmount = roundMoney(receipt.paidAmount || 0);
+        const balances = deriveBalances(receipt.totalPurchaseAmount || 0, paidAmount, 0);
+        receipt.paidAmount = paidAmount;
+        receipt.outstandingAmount = balances.outstandingAmount;
+        receipt.paymentStatus = balances.paymentStatus;
+      }
+      if (alloc.amountApplied > (receipt.outstandingAmount || 0)) {
+        throw new ApiError(400, `Payment exceeds outstanding amount on ${receipt.receiptNumber}`);
+      }
+      loaded.push({ receipt, amountApplied: alloc.amountApplied });
+    }
+    return loaded;
+  }
+
   if (paymentType !== 'receive' && paymentType !== 'refund') {
     throw new ApiError(400, 'Invoice allocations are only allowed for customer receipts');
   }
@@ -1148,6 +1323,9 @@ async function loadAndValidateAllocations(allocations, { customerId, paymentAmou
 
   const loaded = [];
   for (const alloc of allocations) {
+    if (!alloc.saleId) {
+      throw new ApiError(400, 'saleId is required for customer payment allocations');
+    }
     let saleQuery = Sale.findById(alloc.saleId);
     if (session) saleQuery = saleQuery.session(session);
     const sale = await saleQuery;
@@ -1187,6 +1365,9 @@ async function postPaymentEffects({ paymentType, accountId, paymentAmount, alloc
   }
   if (paymentType === 'pay') {
     await changeAccount(accountId, -paymentAmount, session);
+    for (const alloc of allocations) {
+      if (alloc.receipt) await applyReceiptPayment(alloc.receipt, alloc.amountApplied, session);
+    }
   }
 }
 
@@ -1210,6 +1391,12 @@ async function reversePaymentEffects(payment, session) {
   }
   if (payment.paymentType === 'pay') {
     await changeAccount(payment.accountId, payment.paymentAmount, session);
+    for (const alloc of allocations) {
+      const receiptId = alloc.lpgReceiptId?._id || alloc.lpgReceiptId;
+      if (!receiptId) continue;
+      const receipt = await LPGReceipt.findById(receiptId).session(session);
+      if (receipt) await applyReceiptPayment(receipt, -alloc.amountApplied, session);
+    }
   }
 }
 
@@ -1225,19 +1412,37 @@ async function listPayments(query) {
   const paymentStatus = query.paymentStatus || query.status;
   if (paymentStatus) filter.paymentStatus = paymentStatus;
 
+  const extraFilters = [];
+  if (query.lpgReceiptId) {
+    extraFilters.push({
+      $or: [
+        { lpgReceiptId: query.lpgReceiptId },
+        { 'allocations.lpgReceiptId': query.lpgReceiptId },
+      ],
+    });
+  }
+
   if (query.search) {
     const regex = { $regex: query.search.trim(), $options: 'i' };
     const [customers, suppliers] = await Promise.all([
       Customer.find({ $or: [{ customerName: regex }, { customerCode: regex }] }).select('_id'),
       Supplier.find({ $or: [{ supplierName: regex }, { supplierCode: regex }] }).select('_id'),
     ]);
-    filter.$or = [
-      { paymentNumber: regex },
-      { referenceNumber: regex },
-      { remarks: regex },
-      { customerId: { $in: customers.map((item) => item._id) } },
-      { supplierId: { $in: suppliers.map((item) => item._id) } },
-    ];
+    extraFilters.push({
+      $or: [
+        { paymentNumber: regex },
+        { referenceNumber: regex },
+        { remarks: regex },
+        { customerId: { $in: customers.map((item) => item._id) } },
+        { supplierId: { $in: suppliers.map((item) => item._id) } },
+      ],
+    });
+  }
+
+  if (extraFilters.length === 1) {
+    Object.assign(filter, extraFilters[0]);
+  } else if (extraFilters.length > 1) {
+    filter.$and = extraFilters;
   }
 
   const findQuery = populateQuery(
@@ -1270,13 +1475,18 @@ async function getPaymentFormOptions(query = {}) {
 
   let ledgerBalance = 0;
   let outstandingInvoices = [];
+  let outstandingReceipts = [];
   if (query.customerId) {
     [ledgerBalance, outstandingInvoices] = await Promise.all([
       customerLedgerOutstanding(query.customerId),
       outstandingSalesForCustomer(query.customerId),
     ]);
   } else if (query.supplierId) {
-    ledgerBalance = await supplierLedgerOutstanding(query.supplierId);
+    [ledgerBalance, outstandingReceipts] = await Promise.all([
+      supplierLedgerOutstanding(query.supplierId),
+      outstandingReceiptsForSupplier(query.supplierId),
+    ]);
+    outstandingInvoices = outstandingReceipts;
   }
 
   return {
@@ -1290,6 +1500,7 @@ async function getPaymentFormOptions(query = {}) {
       ? `${formatRs(ledgerBalance)} Outstanding`
       : '',
     outstandingInvoices,
+    outstandingReceipts,
     customers: customers.map((customer) => ({
       _id: customer._id,
       customerCode: customer.customerCode,
@@ -1843,14 +2054,21 @@ async function createPayment(body, req) {
       const firstSale = await Sale.findById(allocations[0].saleId).session(session);
       customerId = firstSale?.customerId || customerId;
     }
+    if (allocations[0]?.lpgReceiptId && !supplierId && paymentType === 'pay') {
+      const firstReceipt = await LPGReceipt.findById(allocations[0].lpgReceiptId).session(session);
+      supplierId = firstReceipt?.supplierId || supplierId;
+    }
 
     if (customerId) await assertCustomer(customerId, session);
+    if (paymentType === 'pay' && !supplierId) {
+      throw new ApiError(400, 'supplierId is required when paymentType is pay');
+    }
     if (supplierId) await assertSupplier(supplierId, session);
     await assertAccount(body.accountId, session);
 
     const loadedAllocations = await loadAndValidateAllocations(
       allocations,
-      { customerId, paymentAmount: body.paymentAmount, paymentType },
+      { customerId, supplierId, paymentAmount: body.paymentAmount, paymentType },
       session
     );
 
@@ -1863,11 +2081,16 @@ async function createPayment(body, req) {
       }, session);
     }
 
-    const invoices = loadedAllocations.map((item) => ({
-      _id: item.sale._id,
-      invoiceNumber: item.sale.invoiceNumber,
-      outstandingAmount: item.sale.outstandingAmount + (isDraft ? 0 : item.amountApplied),
-    }));
+    const invoices = loadedAllocations.map((item) => {
+      const doc = item.sale || item.receipt;
+      return {
+        _id: doc._id,
+        invoiceNumber: item.sale?.invoiceNumber || item.receipt?.receiptNumber,
+        receiptNumber: item.receipt?.receiptNumber,
+        outstandingAmount: (item.sale?.outstandingAmount ?? item.receipt?.outstandingAmount ?? 0)
+          + (isDraft ? 0 : item.amountApplied),
+      };
+    });
     const remarks = body.remarks || buildAllocationRemarks(allocations, invoices, body.paymentAmount);
     const paymentNumber = body.paymentNumber
       ? await assignNumber(Payment, 'paymentNumber', 'PAY', body.paymentNumber, session)
@@ -1881,6 +2104,7 @@ async function createPayment(body, req) {
           customerId,
           supplierId,
           saleId: allocations[0]?.saleId || null,
+          lpgReceiptId: allocations[0]?.lpgReceiptId || null,
           allocations,
           accountId: body.accountId,
           paymentAmount: body.paymentAmount,
@@ -1954,14 +2178,25 @@ async function updatePayment(id, body, req) {
       payment.supplierId = body.supplierId;
     }
     if (body.allocations !== undefined) {
-      const allocations = normalizeAllocations({ ...body, paymentAmount: payment.paymentAmount, saleId: body.saleId });
+      const allocations = normalizeAllocations({
+        ...body,
+        paymentAmount: payment.paymentAmount,
+        saleId: body.saleId,
+        lpgReceiptId: body.lpgReceiptId,
+      });
       await loadAndValidateAllocations(
         allocations,
-        { customerId: payment.customerId, paymentAmount: payment.paymentAmount, paymentType: payment.paymentType },
+        {
+          customerId: payment.customerId,
+          supplierId: payment.supplierId,
+          paymentAmount: payment.paymentAmount,
+          paymentType: payment.paymentType,
+        },
         session
       );
       payment.allocations = allocations;
       payment.saleId = allocations[0]?.saleId || null;
+      payment.lpgReceiptId = allocations[0]?.lpgReceiptId || null;
     }
     if (body.remarks !== undefined) payment.remarks = body.remarks;
 
@@ -1969,11 +2204,17 @@ async function updatePayment(id, body, req) {
       const allocations = normalizeAllocations({
         allocations: payment.allocations,
         saleId: payment.saleId,
+        lpgReceiptId: payment.lpgReceiptId,
         paymentAmount: payment.paymentAmount,
       });
       const loadedAllocations = await loadAndValidateAllocations(
         allocations,
-        { customerId: payment.customerId, paymentAmount: payment.paymentAmount, paymentType: payment.paymentType },
+        {
+          customerId: payment.customerId,
+          supplierId: payment.supplierId,
+          paymentAmount: payment.paymentAmount,
+          paymentType: payment.paymentType,
+        },
         session
       );
       await postPaymentEffects({
@@ -2505,6 +2746,10 @@ function toSupplierPurchaseItem(doc) {
     receivedQuantityKg: doc.receivedQuantityKg,
     purchaseRatePerKg: roundMoney(doc.purchaseRatePerKg),
     totalPurchaseAmount: roundMoney(doc.totalPurchaseAmount),
+    paidAmount: roundMoney(doc.paidAmount),
+    outstandingAmount: roundMoney(doc.outstandingAmount ?? roundMoney((doc.totalPurchaseAmount || 0) - (doc.paidAmount || 0))),
+    paymentStatus: doc.paymentStatus || 'unpaid',
+    paymentStatusLabel: paymentStatusLabel(doc.paymentStatus || 'unpaid'),
     receiptStatus,
     storageTankId: tank?._id || doc.storageTankId || null,
     tankCode: tank?.tankCode || '',
@@ -2579,6 +2824,7 @@ async function getSupplierPurchaseHistory(supplierId, query = {}) {
     LPGReceipt.find(filter).sort({ receivedAt: -1, createdAt: -1 }).skip(skip).limit(limit),
     LPG_RECEIPT_POPULATE
   );
+  await backfillReceiptPaymentBalances({ supplierId: supplier._id });
   const [items, total, purchases, allPayments] = await Promise.all([
     findQuery.lean(),
     LPGReceipt.countDocuments(filter),
@@ -2632,10 +2878,12 @@ async function getSupplierPaymentHistory(supplierId, query = {}) {
   const balanceAfterById = computeSupplierPaymentBalanceAfter(purchases, allPayments);
   const items = pageDocs.map((doc) => {
     const item = toPaymentItem(doc);
+    const receipts = item.allocations.map((line) => line.receiptNumber || line.invoiceNumber).filter(Boolean);
     return withAfterBalance({
       ...item,
       receiptNumber: item.paymentNumber,
-      appliedToInvoice: item.referenceNumber || '',
+      appliedToInvoice: receipts.join(', ') || item.referenceNumber || '',
+      appliedToReceipts: receipts,
     }, doc._id, balanceAfterById);
   });
 
@@ -2646,6 +2894,92 @@ const supplierLedger = {
   getSummary: getSupplierLedger,
   listPurchases: getSupplierPurchaseHistory,
   listPayments: getSupplierPaymentHistory,
+};
+
+async function paymentAccountsByReceiptIds(receiptIds) {
+  if (!receiptIds.length) return new Map();
+  const payments = await Payment.find({
+    paymentType: 'pay',
+    $or: [
+      { lpgReceiptId: { $in: receiptIds } },
+      { 'allocations.lpgReceiptId': { $in: receiptIds } },
+    ],
+  })
+    .sort({ createdAt: 1 })
+    .populate('accountId', 'accountCode accountName accountType')
+    .lean();
+
+  const firstByReceipt = new Map();
+  for (const payment of payments) {
+    const ids = new Set();
+    if (payment.lpgReceiptId) ids.add(String(payment.lpgReceiptId));
+    for (const alloc of payment.allocations || []) {
+      if (alloc.lpgReceiptId) ids.add(String(alloc.lpgReceiptId._id || alloc.lpgReceiptId));
+    }
+    for (const key of ids) {
+      if (!firstByReceipt.has(key)) firstByReceipt.set(key, payment);
+    }
+  }
+  return firstByReceipt;
+}
+
+function withReceiptPaymentAccount(receipt, payment) {
+  const account = payment?.accountId && typeof payment.accountId === 'object' ? payment.accountId : null;
+  const method = receipt.paymentMethod || payment?.paymentMethod || '';
+  return {
+    ...receipt,
+    accountId: account?._id || payment?.accountId || null,
+    accountName: account ? accountLabel(account) : '',
+    accountType: account?.accountType || '',
+    paymentMethod: method,
+    paymentMethodLabel: method ? paymentMethodLabel(method) : '',
+    referenceNumber: receipt.referenceNumber || payment?.referenceNumber || '',
+  };
+}
+
+async function attachReceiptPaymentAccounts(receipts) {
+  const payments = await paymentAccountsByReceiptIds(receipts.map((item) => item._id).filter(Boolean));
+  return receipts.map((receipt) => withReceiptPaymentAccount(receipt, payments.get(String(receipt._id))));
+}
+
+async function supplierBalancesForReceipt(supplierId, receiptId, receiptStatus) {
+  const outstandingBalance = await supplierLedgerOutstanding(supplierId);
+  if (receiptStatus === 'pending') {
+    return {
+      outstandingBalance,
+      afterBalance: outstandingBalance,
+      balanceAfter: outstandingBalance,
+    };
+  }
+
+  const [purchases, payments] = await Promise.all([
+    LPGReceipt.find({ supplierId, receiptStatus: 'confirmed' })
+      .select('totalPurchaseAmount receivedAt receiptStatus createdAt')
+      .lean(),
+    Payment.find({ supplierId, paymentType: 'pay' })
+      .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
+      .lean(),
+  ]);
+  const afterBalance = computeSupplierPaymentBalanceAfter(purchases, payments)[String(receiptId)]
+    ?? outstandingBalance;
+  return {
+    outstandingBalance,
+    afterBalance,
+    balanceAfter: afterBalance,
+  };
+}
+
+const receiptFinance = {
+  postSupplierPayment,
+  applyReceiptPayment,
+  outstandingReceiptsForSupplier,
+  supplierLedgerOutstanding,
+  supplierBalancesForReceipt,
+  attachReceiptPaymentAccounts,
+  backfillReceiptPaymentBalances,
+  deriveBalances,
+  loadActiveAccounts,
+  mapAccountOption,
 };
 
 function accountDirectionOf(paymentType) {
@@ -2701,7 +3035,7 @@ function toAccountLedgerProfile(account) {
 
 function paymentToAccountTransaction(doc) {
   const item = toPaymentItem(doc);
-  const invoices = item.allocations.map((line) => line.invoiceNumber).filter(Boolean);
+  const invoices = item.allocations.map((line) => line.invoiceNumber || line.receiptNumber).filter(Boolean);
   const amount = roundMoney(item.paymentAmount);
   const direction = accountDirectionOf(item.paymentType);
   const skip = item.paymentStatus === 'pending';
@@ -2900,4 +3234,13 @@ const accountLedger = {
   listTransactions: getAccountTransactions,
 };
 
-module.exports = { sale, salesReturn, payment, expense, customerLedger, supplierLedger, accountLedger };
+module.exports = {
+  sale,
+  salesReturn,
+  payment,
+  expense,
+  customerLedger,
+  supplierLedger,
+  accountLedger,
+  receiptFinance,
+};

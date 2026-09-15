@@ -154,8 +154,13 @@ const salesReturn = {
 };
 
 const paymentAllocation = z.object({
-  saleId: objectId,
+  saleId: objectId.optional(),
+  lpgReceiptId: objectId.optional(),
   amountApplied: positiveAmount,
+}).superRefine((data, ctx) => {
+  if (!data.saleId && !data.lpgReceiptId) {
+    ctx.addIssue({ code: 'custom', message: 'saleId or lpgReceiptId is required', path: ['saleId'] });
+  }
 });
 
 const payment = {
@@ -167,6 +172,7 @@ const payment = {
       customerId: objectId.optional(),
       supplierId: objectId.optional(),
       saleId: objectId.optional(),
+      lpgReceiptId: objectId.optional(),
       accountId: objectId,
       paymentAmount: positiveAmount,
       paymentMethod: z.enum(PAYMENT_METHODS),
@@ -189,8 +195,13 @@ const payment = {
           ctx.addIssue({ code: 'custom', message: 'supplierId is not allowed for receive/refund' });
         }
       }
-      if (paymentType === 'pay' && !data.supplierId) {
-        ctx.addIssue({ code: 'custom', message: 'supplierId is required when paymentType is pay' });
+      if (paymentType === 'pay') {
+        if (!data.supplierId && !data.lpgReceiptId && !(data.allocations && data.allocations.length)) {
+          ctx.addIssue({ code: 'custom', message: 'supplierId or lpgReceiptId is required when paymentType is pay' });
+        }
+        if (data.customerId) {
+          ctx.addIssue({ code: 'custom', message: 'customerId is not allowed for supplier payments' });
+        }
       }
     }),
   }),
@@ -207,6 +218,8 @@ const payment = {
         allocations: z.array(paymentAllocation).optional(),
         customerId: objectId.optional(),
         supplierId: objectId.optional(),
+        saleId: objectId.optional(),
+        lpgReceiptId: objectId.optional(),
         paymentStatus: z.enum(PAYMENT_VOUCHER_STATUS_VALUES).optional(),
         saveAsDraft: z.boolean().optional(),
       })
@@ -216,6 +229,7 @@ const payment = {
     customerId: objectId.optional(),
     supplierId: objectId.optional(),
     saleId: objectId.optional(),
+    lpgReceiptId: objectId.optional(),
     accountId: objectId.optional(),
     paymentType: z.enum(PAYMENT_TYPES).optional(),
     direction: z.enum(PAYMENT_DIRECTION_VALUES).optional(),

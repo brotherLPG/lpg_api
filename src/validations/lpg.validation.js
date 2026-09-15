@@ -8,10 +8,32 @@ const {
   listMasterQuery,
   atLeastOneField,
 } = require('./common.validation');
-const { RECEIPT_STATUS_VALUES, BATCH_STATUS_VALUES } = require('../constants/masters');
+const { RECEIPT_STATUS_VALUES, BATCH_STATUS_VALUES, PAYMENT_METHODS, PAYMENT_STATUSES } = require('../constants/masters');
 
 const optionalDate = z.coerce.date().optional();
 const optionalCode = code.optional();
+const optionalAccountId = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'object' && value._id) return String(value._id);
+  return value;
+}, objectId.optional());
+
+const receiptPayment = z.object({
+  accountId: optionalAccountId,
+  paymentAmount: nonNegative.optional(),
+  paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+  referenceNumber: z.string().trim().max(80).optional(),
+});
+
+const receiptPaymentFields = {
+  amountPaid: nonNegative.optional(),
+  accountId: optionalAccountId,
+  paymentAccountId: optionalAccountId,
+  paidFromAccountId: optionalAccountId,
+  paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+  referenceNumber: z.string().trim().max(80).optional(),
+  payment: receiptPayment.optional(),
+};
 
 const receiptCreateBody = {
   receiptNumber: optionalCode,
@@ -26,6 +48,7 @@ const receiptCreateBody = {
   remarks: z.string().trim().max(1000).optional(),
   receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
   saveAsDraft: z.boolean().optional(),
+  ...receiptPaymentFields,
 };
 
 const receiptUpdateBody = {
@@ -41,6 +64,7 @@ const receiptUpdateBody = {
   remarks: z.string().trim().max(1000).optional(),
   receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
   saveAsDraft: z.boolean().optional(),
+  ...receiptPaymentFields,
 };
 
 const fillingCreateBody = {
@@ -73,6 +97,7 @@ const receiptList = listMasterQuery({
   supplierId: objectId.optional(),
   storageTankId: objectId.optional(),
   receiptStatus: z.enum(RECEIPT_STATUS_VALUES).optional(),
+  paymentStatus: z.enum(PAYMENT_STATUSES).optional(),
   date: z.coerce.date().optional(),
   startDate: z.coerce.date().optional(),
   endDate: z.coerce.date().optional(),

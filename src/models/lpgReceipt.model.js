@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { PAYMENT_STATUSES, PAYMENT_METHODS } = require('../constants/masters');
 
 const lpgReceiptSchema = new mongoose.Schema(
   {
@@ -25,6 +26,18 @@ const lpgReceiptSchema = new mongoose.Schema(
     },
     purchaseRatePerKg: { type: Number, min: 0, default: 0 },
     totalPurchaseAmount: { type: Number, min: 0, default: 0 },
+    paidAmount: { type: Number, min: 0, default: 0 },
+    outstandingAmount: { type: Number, default: 0 },
+    paymentStatus: {
+      type: String,
+      enum: PAYMENT_STATUSES,
+      default: 'unpaid',
+    },
+    paymentMethod: {
+      type: String,
+      enum: PAYMENT_METHODS,
+    },
+    referenceNumber: { type: String, trim: true, default: '' },
     storageTankId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'StorageTank',
@@ -54,5 +67,6 @@ const lpgReceiptSchema = new mongoose.Schema(
 lpgReceiptSchema.index({ supplierId: 1, receivedAt: -1 });
 lpgReceiptSchema.index({ storageTankId: 1, receivedAt: -1 });
 lpgReceiptSchema.index({ receiptStatus: 1, receivedAt: -1 });
+lpgReceiptSchema.index({ paymentStatus: 1, receiptStatus: 1 });
 
 module.exports = mongoose.model('LPGReceipt', lpgReceiptSchema);
