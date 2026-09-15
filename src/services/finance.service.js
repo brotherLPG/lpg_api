@@ -983,16 +983,46 @@ async function nextPaymentNumber(session) {
 }
 
 async function customerLedgerOutstanding(customerId, session) {
-  const pipeline = Sale.aggregate([
-    { $match: { customerId, saleStatus: { $nin: ['cancelled', 'draft'] } } },
-    { $group: { _id: null, outstanding: { $sum: '$outstandingAmount' } } },
+  const saleMatch = { customerId, saleStatus: { $nin: ['cancelled', 'draft'] } };
+  const paymentMatch = {
+    customerId,
+    paymentType: { $in: ['receive', 'refund'] },
+    paymentStatus: { $ne: 'pending' },
+  };
+
+  const salesAgg = Sale.aggregate([
+    { $match: saleMatch },
+    { $group: { _id: null, total: { $sum: '$totalAmount' } } },
   ]);
-  if (session) pipeline.session(session);
-  const [row] = await pipeline;
-  let customerQuery = Customer.findById(customerId).select('openingBalanceAmount');
-  if (session) customerQuery = customerQuery.session(session);
-  const customer = await customerQuery;
-  return roundMoney((row?.outstanding || 0) + (customer?.openingBalanceAmount || 0));
+  const returnAgg = SalesReturn.aggregate([
+    { $match: { customerId } },
+    { $group: { _id: null, total: { $sum: '$totalReturnAmount' } } },
+  ]);
+  const paymentAgg = Payment.aggregate([
+    { $match: paymentMatch },
+    {
+      $group: {
+        _id: null,
+        received: {
+          $sum: { $cond: [{ $eq: ['$paymentType', 'receive'] }, '$paymentAmount', 0] },
+        },
+        refunded: {
+          $sum: { $cond: [{ $eq: ['$paymentType', 'refund'] }, '$paymentAmount', 0] },
+        },
+      },
+    },
+  ]);
+
+  if (session) {
+    salesAgg.session(session);
+    returnAgg.session(session);
+    paymentAgg.session(session);
+  }
+
+  const [[saleRow], [returnRow], [paymentRow]] = await Promise.all([salesAgg, returnAgg, paymentAgg]);
+  return roundMoney(
+    (saleRow?.total || 0) - (returnRow?.total || 0) - (paymentRow?.received || 0) + (paymentRow?.refunded || 0)
+  );
 }
 
 async function supplierLedgerOutstanding(supplierId, session) {
@@ -1009,10 +1039,7 @@ async function supplierLedgerOutstanding(supplierId, session) {
     paid.session(session);
   }
   const [[purchaseRow], [paidRow]] = await Promise.all([purchases, paid]);
-  let supplierQuery = Supplier.findById(supplierId).select('openingBalanceAmount');
-  if (session) supplierQuery = supplierQuery.session(session);
-  const supplier = await supplierQuery;
-  return roundMoney((supplier?.openingBalanceAmount || 0) + (purchaseRow?.total || 0) - (paidRow?.total || 0));
+  return roundMoney((purchaseRow?.total || 0) - (paidRow?.total || 0));
 }
 
 async function outstandingSalesForCustomer(customerId) {
@@ -2086,7 +2113,22 @@ function eventTimestamp(date, createdAt) {
   return new Date(date || createdAt || 0).getTime();
 }
 
-function computePaymentBalanceAfter(openingBalanceAmount, sales, returns, payments) {
+function ledgerEventRank(type) {
+  if (type === 'sale' || type === 'purchase') return 0;
+  if (type === 'return' || type === 'refund') return 1;
+  return 2;
+}
+
+function withAfterBalance(item, id, balanceAfterById) {
+  const afterBalance = balanceAfterById[String(id)] ?? null;
+  return {
+    ...item,
+    balanceAfter: afterBalance,
+    afterBalance,
+  };
+}
+
+function computePaymentBalanceAfter(sales, returns, payments) {
   const events = [];
 
   sales.forEach((sale) => {
@@ -2095,6 +2137,7 @@ function computePaymentBalanceAfter(openingBalanceAmount, sales, returns, paymen
       at: eventTimestamp(sale.invoiceDate, sale.createdAt),
       createdAt: sale.createdAt,
       amount: sale.totalAmount,
+      id: String(sale._id),
     });
   });
 
@@ -2118,9 +2161,13 @@ function computePaymentBalanceAfter(openingBalanceAmount, sales, returns, paymen
     });
   });
 
-  events.sort((left, right) => left.at - right.at || new Date(left.createdAt || 0) - new Date(right.createdAt || 0));
+  events.sort((left, right) => (
+    left.at - right.at
+    || ledgerEventRank(left.type) - ledgerEventRank(right.type)
+    || new Date(left.createdAt || 0) - new Date(right.createdAt || 0)
+  ));
 
-  let running = roundMoney(openingBalanceAmount);
+  let running = 0;
   const balanceAfterById = {};
 
   events.forEach((event) => {
@@ -2195,19 +2242,31 @@ async function getCustomerLedger(customerId) {
 }
 
 async function getCustomerSalesHistory(customerId, query = {}) {
-  await loadCustomerForLedger(customerId);
+  const customer = await loadCustomerForLedger(customerId);
   const { page, limit, skip } = parsePagination(query);
   const filter = await buildSaleListFilter({ ...query, customerId });
   const findQuery = populateQuery(
     Sale.find(filter).sort({ invoiceDate: -1, createdAt: -1 }).skip(skip).limit(limit),
     SALE_POPULATE
   );
-  const [items, total] = await Promise.all([
+  const [items, total, allSales, returns, allPayments] = await Promise.all([
     findQuery.lean(),
     Sale.countDocuments(filter),
+    Sale.find({ customerId: customer._id, ...activeSaleMatch() })
+      .select('totalAmount invoiceDate createdAt')
+      .lean(),
+    SalesReturn.find({ customerId: customer._id }).select('totalReturnAmount returnDate createdAt').lean(),
+    Payment.find({ customerId: customer._id, paymentType: { $in: ['receive', 'refund'] } })
+      .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
+      .lean(),
   ]);
 
-  return paginated(await attachReceiptAccounts(items.map(toSaleItem)), total, page, limit);
+  const balanceAfterById = computePaymentBalanceAfter(allSales, returns, allPayments);
+  const mapped = await attachReceiptAccounts(items.map((doc) => (
+    withAfterBalance(toSaleItem(doc), doc._id, balanceAfterById)
+  )));
+
+  return paginated(mapped, total, page, limit);
 }
 
 async function getCustomerPaymentHistory(customerId, query = {}) {
@@ -2241,23 +2300,17 @@ async function getCustomerPaymentHistory(customerId, query = {}) {
       .lean(),
   ]);
 
-  const balanceAfterById = computePaymentBalanceAfter(
-    customer.openingBalanceAmount,
-    sales,
-    returns,
-    allPayments
-  );
+  const balanceAfterById = computePaymentBalanceAfter(sales, returns, allPayments);
 
   const items = pageDocs.map((doc) => {
     const item = toPaymentItem(doc);
     const invoices = item.allocations.map((line) => line.invoiceNumber).filter(Boolean);
-    return {
+    return withAfterBalance({
       ...item,
       receiptNumber: item.paymentNumber,
       appliedToInvoice: invoices.join(', '),
       appliedToInvoices: invoices,
-      balanceAfter: balanceAfterById[String(doc._id)] ?? null,
-    };
+    }, doc._id, balanceAfterById);
   });
 
   return paginated(items, total, page, limit);
@@ -2306,7 +2359,7 @@ async function loadSupplierForLedger(supplierId) {
   return supplier;
 }
 
-function computeSupplierPaymentBalanceAfter(openingBalanceAmount, purchases, payments) {
+function computeSupplierPaymentBalanceAfter(purchases, payments) {
   const events = [];
 
   purchases.forEach((purchase) => {
@@ -2316,6 +2369,7 @@ function computeSupplierPaymentBalanceAfter(openingBalanceAmount, purchases, pay
       at: eventTimestamp(purchase.receivedAt, purchase.createdAt),
       createdAt: purchase.createdAt,
       amount: purchase.totalPurchaseAmount,
+      id: String(purchase._id),
     });
   });
 
@@ -2330,9 +2384,13 @@ function computeSupplierPaymentBalanceAfter(openingBalanceAmount, purchases, pay
     });
   });
 
-  events.sort((left, right) => left.at - right.at || new Date(left.createdAt || 0) - new Date(right.createdAt || 0));
+  events.sort((left, right) => (
+    left.at - right.at
+    || ledgerEventRank(left.type) - ledgerEventRank(right.type)
+    || new Date(left.createdAt || 0) - new Date(right.createdAt || 0)
+  ));
 
-  let running = roundMoney(openingBalanceAmount);
+  let running = 0;
   const balanceAfterById = {};
 
   events.forEach((event) => {
@@ -2437,7 +2495,7 @@ async function getSupplierLedger(supplierId) {
 }
 
 async function getSupplierPurchaseHistory(supplierId, query = {}) {
-  await loadSupplierForLedger(supplierId);
+  const supplier = await loadSupplierForLedger(supplierId);
   const { page, limit, skip } = parsePagination(query);
   const filter = applyDateRange({ supplierId }, 'receivedAt', query);
   if (query.receiptStatus) filter.receiptStatus = query.receiptStatus;
@@ -2455,12 +2513,24 @@ async function getSupplierPurchaseHistory(supplierId, query = {}) {
     LPGReceipt.find(filter).sort({ receivedAt: -1, createdAt: -1 }).skip(skip).limit(limit),
     LPG_RECEIPT_POPULATE
   );
-  const [items, total] = await Promise.all([
+  const [items, total, purchases, allPayments] = await Promise.all([
     findQuery.lean(),
     LPGReceipt.countDocuments(filter),
+    LPGReceipt.find({ supplierId: supplier._id, receiptStatus: 'confirmed' })
+      .select('totalPurchaseAmount receivedAt receiptStatus createdAt')
+      .lean(),
+    Payment.find({ supplierId: supplier._id, paymentType: 'pay' })
+      .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
+      .lean(),
   ]);
 
-  return paginated(items.map(toSupplierPurchaseItem), total, page, limit);
+  const balanceAfterById = computeSupplierPaymentBalanceAfter(purchases, allPayments);
+  return paginated(
+    items.map((doc) => withAfterBalance(toSupplierPurchaseItem(doc), doc._id, balanceAfterById)),
+    total,
+    page,
+    limit
+  );
 }
 
 async function getSupplierPaymentHistory(supplierId, query = {}) {
@@ -2493,20 +2563,14 @@ async function getSupplierPaymentHistory(supplierId, query = {}) {
       .lean(),
   ]);
 
-  const balanceAfterById = computeSupplierPaymentBalanceAfter(
-    supplier.openingBalanceAmount,
-    purchases,
-    allPayments
-  );
-
+  const balanceAfterById = computeSupplierPaymentBalanceAfter(purchases, allPayments);
   const items = pageDocs.map((doc) => {
     const item = toPaymentItem(doc);
-    return {
+    return withAfterBalance({
       ...item,
       receiptNumber: item.paymentNumber,
       appliedToInvoice: item.referenceNumber || '',
-      balanceAfter: balanceAfterById[String(doc._id)] ?? null,
-    };
+    }, doc._id, balanceAfterById);
   });
 
   return paginated(items, total, page, limit);
