@@ -71,6 +71,12 @@ function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+function asObjectId(value) {
+  if (!value) return value;
+  if (value instanceof mongoose.Types.ObjectId) return value;
+  return new mongoose.Types.ObjectId(String(value));
+}
+
 function applyDateRange(filter, field, query) {
   const startDate = query.startDate || query.fromDate || query.dateFrom;
   const endDate = query.endDate || query.toDate || query.dateTo;
@@ -983,9 +989,10 @@ async function nextPaymentNumber(session) {
 }
 
 async function customerLedgerOutstanding(customerId, session) {
-  const saleMatch = { customerId, saleStatus: { $nin: ['cancelled', 'draft'] } };
+  const id = asObjectId(customerId);
+  const saleMatch = { customerId: id, saleStatus: { $nin: ['cancelled', 'draft'] } };
   const paymentMatch = {
-    customerId,
+    customerId: id,
     paymentType: { $in: ['receive', 'refund'] },
     paymentStatus: { $ne: 'pending' },
   };
@@ -995,7 +1002,7 @@ async function customerLedgerOutstanding(customerId, session) {
     { $group: { _id: null, total: { $sum: '$totalAmount' } } },
   ]);
   const returnAgg = SalesReturn.aggregate([
-    { $match: { customerId } },
+    { $match: { customerId: id } },
     { $group: { _id: null, total: { $sum: '$totalReturnAmount' } } },
   ]);
   const paymentAgg = Payment.aggregate([
@@ -1026,12 +1033,13 @@ async function customerLedgerOutstanding(customerId, session) {
 }
 
 async function supplierLedgerOutstanding(supplierId, session) {
+  const id = asObjectId(supplierId);
   const purchases = LPGReceipt.aggregate([
-    { $match: { supplierId, receiptStatus: 'confirmed' } },
+    { $match: { supplierId: id, receiptStatus: 'confirmed' } },
     { $group: { _id: null, total: { $sum: '$totalPurchaseAmount' } } },
   ]);
   const paid = Payment.aggregate([
-    { $match: { supplierId, paymentType: 'pay', paymentStatus: { $ne: 'pending' } } },
+    { $match: { supplierId: id, paymentType: 'pay', paymentStatus: { $ne: 'pending' } } },
     { $group: { _id: null, total: { $sum: '$paymentAmount' } } },
   ]);
   if (session) {
