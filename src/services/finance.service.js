@@ -72,6 +72,38 @@ function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+const MIN_BUSINESS_TIMESTAMP = Date.UTC(2000, 0, 1);
+
+function usableTimestamp(value) {
+  if (value == null || value === '') return null;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time) || time < MIN_BUSINESS_TIMESTAMP) return null;
+  return time;
+}
+
+function eventTimestamp(date, createdAt) {
+  return usableTimestamp(date) ?? usableTimestamp(createdAt) ?? 0;
+}
+
+function newestPaymentFirst(left, right) {
+  return (
+    eventTimestamp(right.paymentDate, right.createdAt) - eventTimestamp(left.paymentDate, left.createdAt)
+    || new Date(right.createdAt || 0) - new Date(left.createdAt || 0)
+  );
+}
+
+function coalesceBusinessDate(...values) {
+  for (const value of values) {
+    const time = usableTimestamp(value);
+    if (time != null) return new Date(time);
+  }
+  return null;
+}
+
+function resolveBusinessDate(...values) {
+  return coalesceBusinessDate(...values) || new Date();
+}
+
 function asObjectId(value) {
   if (!value) return value;
   if (value instanceof mongoose.Types.ObjectId) return value;
@@ -426,7 +458,7 @@ async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMet
         accountId: account._id,
         paymentAmount: amount,
         paymentMethod: paymentMethodForAccount(account, paymentMethod),
-        paymentDate: paymentDate || sale.invoiceDate || new Date(),
+        paymentDate: resolveBusinessDate(paymentDate, sale.invoiceDate),
         referenceNumber: referenceNumber || '',
         receivedOrPaidByUserId: userId,
       },
@@ -960,7 +992,7 @@ function toPaymentItem(doc) {
   return {
     _id: doc._id,
     paymentNumber: doc.paymentNumber,
-    paymentDate: doc.paymentDate,
+    paymentDate: coalesceBusinessDate(doc.paymentDate, doc.createdAt),
     paymentType,
     direction: paymentType === 'pay' ? 'pay' : 'receive',
     directionLabel: paymentDirectionLabel(paymentType === 'refund' ? 'receive' : paymentType),
@@ -1825,7 +1857,7 @@ async function createPayment(body, req) {
           accountId: body.accountId,
           paymentAmount: body.paymentAmount,
           paymentMethod: body.paymentMethod || 'cash',
-          paymentDate: body.paymentDate,
+          paymentDate: resolveBusinessDate(body.paymentDate),
           paymentStatus: isDraft ? 'pending' : 'recorded',
           referenceNumber: body.referenceNumber || '',
           remarks,
@@ -1875,7 +1907,9 @@ async function updatePayment(id, body, req) {
 
     const postingNow = body.paymentStatus === 'recorded' || body.saveAsDraft === false;
 
-    if (body.paymentDate !== undefined) payment.paymentDate = body.paymentDate;
+    if (body.paymentDate !== undefined) {
+      payment.paymentDate = resolveBusinessDate(body.paymentDate, payment.paymentDate, payment.createdAt);
+    }
     if (body.paymentMethod !== undefined) payment.paymentMethod = body.paymentMethod;
     if (body.accountId !== undefined) {
       await assertAccount(body.accountId, session);
@@ -2118,10 +2152,6 @@ async function loadCustomerForLedger(customerId) {
   return customer;
 }
 
-function eventTimestamp(date, createdAt) {
-  return new Date(date || createdAt || 0).getTime();
-}
-
 function ledgerEventRank(type) {
   if (type === 'sale' || type === 'purchase') return 0;
   if (type === 'return' || type === 'refund') return 1;
@@ -2294,12 +2324,8 @@ async function getCustomerPaymentHistory(customerId, query = {}) {
     filter.$or = [{ paymentNumber: regex }, { referenceNumber: regex }, { remarks: regex }];
   }
 
-  const [pageDocs, total, sales, returns, allPayments] = await Promise.all([
-    populateQuery(
-      Payment.find(filter).sort({ paymentDate: -1, createdAt: -1 }).skip(skip).limit(limit),
-      PAYMENT_POPULATE
-    ).lean(),
-    Payment.countDocuments(filter),
+  const [matchedDocs, sales, returns, allPayments] = await Promise.all([
+    populateQuery(Payment.find(filter), PAYMENT_POPULATE).lean(),
     Sale.find({ customerId: customer._id, ...activeSaleMatch() })
       .select('totalAmount invoiceDate createdAt')
       .lean(),
@@ -2309,6 +2335,9 @@ async function getCustomerPaymentHistory(customerId, query = {}) {
       .lean(),
   ]);
 
+  matchedDocs.sort(newestPaymentFirst);
+  const total = matchedDocs.length;
+  const pageDocs = matchedDocs.slice(skip, skip + limit);
   const balanceAfterById = computePaymentBalanceAfter(sales, returns, allPayments);
 
   const items = pageDocs.map((doc) => {
@@ -2558,12 +2587,8 @@ async function getSupplierPaymentHistory(supplierId, query = {}) {
     filter.$or = [{ paymentNumber: regex }, { referenceNumber: regex }, { remarks: regex }];
   }
 
-  const [pageDocs, total, purchases, allPayments] = await Promise.all([
-    populateQuery(
-      Payment.find(filter).sort({ paymentDate: -1, createdAt: -1 }).skip(skip).limit(limit),
-      PAYMENT_POPULATE
-    ).lean(),
-    Payment.countDocuments(filter),
+  const [matchedDocs, purchases, allPayments] = await Promise.all([
+    populateQuery(Payment.find(filter), PAYMENT_POPULATE).lean(),
     LPGReceipt.find({ supplierId: supplier._id, receiptStatus: 'confirmed' })
       .select('totalPurchaseAmount receivedAt receiptStatus createdAt')
       .lean(),
@@ -2571,6 +2596,10 @@ async function getSupplierPaymentHistory(supplierId, query = {}) {
       .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
       .lean(),
   ]);
+
+  matchedDocs.sort(newestPaymentFirst);
+  const total = matchedDocs.length;
+  const pageDocs = matchedDocs.slice(skip, skip + limit);
 
   const balanceAfterById = computeSupplierPaymentBalanceAfter(purchases, allPayments);
   const items = pageDocs.map((doc) => {
