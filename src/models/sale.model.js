@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { SALE_STATUSES, PAYMENT_STATUSES } = require('../constants/masters');
+const { SALE_STATUSES, PAYMENT_STATUSES, PAYMENT_METHODS } = require('../constants/masters');
 
 const saleLineSchema = new mongoose.Schema(
   {
@@ -70,6 +70,11 @@ const saleSchema = new mongoose.Schema(
       enum: SALE_STATUSES,
       default: 'confirmed',
     },
+    paymentMethod: {
+      type: String,
+      enum: PAYMENT_METHODS,
+    },
+    referenceNumber: { type: String, trim: true, default: '' },
     createdByUserId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

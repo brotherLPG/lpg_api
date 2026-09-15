@@ -60,6 +60,11 @@ const saleAccountFields = {
   paidFromAccountId: optionalAccountId,
 };
 
+const salePaymentMetaFields = {
+  paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+  referenceNumber: z.string().trim().max(80).optional(),
+};
+
 const sale = {
   create: z.object({
     body: z.object({
@@ -72,6 +77,7 @@ const sale = {
       tradeDiscountAmount: nonNegative.optional(),
       amountPaid: nonNegative.optional(),
       ...saleAccountFields,
+      ...salePaymentMetaFields,
       remarks: z.string().trim().max(500).optional(),
       internalRemarks: z.string().trim().max(500).optional(),
       saveAsDraft: z.boolean().optional(),
@@ -89,6 +95,7 @@ const sale = {
         tradeDiscountAmount: nonNegative.optional(),
         amountPaid: nonNegative.optional(),
         ...saleAccountFields,
+        ...salePaymentMetaFields,
         remarks: z.string().trim().max(500).optional(),
         internalRemarks: z.string().trim().max(500).optional(),
         saveAsDraft: z.boolean().optional(),

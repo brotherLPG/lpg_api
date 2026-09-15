@@ -372,6 +372,9 @@ function toSaleItem(sale) {
     outstandingAmount: roundMoney(sale.outstandingAmount),
     paymentStatus: sale.paymentStatus,
     paymentStatusLabel: paymentStatusLabel(sale.paymentStatus),
+    paymentMethod: sale.paymentMethod || '',
+    paymentMethodLabel: sale.paymentMethod ? paymentMethodLabel(sale.paymentMethod) : '',
+    referenceNumber: sale.referenceNumber || '',
     saleStatus: sale.saleStatus,
     saleStatusLabel: saleStatusLabel(sale.saleStatus),
     remarks: sale.remarks || '',
@@ -403,6 +406,16 @@ function pickSaleAccountId(body) {
   if (!raw) return null;
   if (typeof raw === 'object' && raw._id) return raw._id;
   return raw;
+}
+
+function pickSalePaymentMethod(body) {
+  return body?.paymentMethod || body?.payment?.paymentMethod;
+}
+
+function pickSaleReferenceNumber(body) {
+  if (body?.referenceNumber !== undefined) return body.referenceNumber;
+  if (body?.payment?.referenceNumber !== undefined) return body.payment.referenceNumber;
+  return undefined;
 }
 
 function paymentMethodForAccount(account, explicit) {
@@ -488,11 +501,15 @@ async function receiptAccountsBySaleIds(saleIds) {
 
 function withReceiptAccount(sale, payment) {
   const account = payment?.accountId && typeof payment.accountId === 'object' ? payment.accountId : null;
+  const paymentMethod = sale.paymentMethod || payment?.paymentMethod || '';
   return {
     ...sale,
     accountId: account?._id || payment?.accountId || null,
     accountName: account ? accountLabel(account) : '',
     accountType: account?.accountType || '',
+    paymentMethod,
+    paymentMethodLabel: paymentMethod ? paymentMethodLabel(paymentMethod) : '',
+    referenceNumber: sale.referenceNumber || payment?.referenceNumber || '',
   };
 }
 
@@ -698,6 +715,7 @@ async function getSaleFormOptions() {
     defaultPaymentTermDays: 0,
     paymentTerms: PAYMENT_TERMS,
     saleTypes: SALE_TYPES,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
     customers: customers.map((customer) => ({
       _id: customer._id,
       customerCode: customer.customerCode,
@@ -1513,6 +1531,8 @@ async function createSale(body, req) {
           outstandingAmount: balances.outstandingAmount,
           paymentStatus: balances.paymentStatus,
           saleStatus: isDraft ? 'draft' : 'confirmed',
+          paymentMethod: pickSalePaymentMethod(body),
+          referenceNumber: pickSaleReferenceNumber(body) || '',
           createdByUserId: req.user._id,
           remarks: body.remarks || body.internalRemarks || '',
         },
@@ -1526,9 +1546,9 @@ async function createSale(body, req) {
         customerId: customer._id,
         amount: amountPaid,
         accountId: pickSaleAccountId(body),
-        paymentMethod: body.payment?.paymentMethod,
+        paymentMethod: pickSalePaymentMethod(body),
         paymentDate: body.invoiceDate,
-        referenceNumber: body.payment?.referenceNumber,
+        referenceNumber: pickSaleReferenceNumber(body),
         userId: req.user._id,
       }, session);
     }
@@ -1563,6 +1583,12 @@ async function applyDraftSaleFields(sale, body, session) {
   if (body.paymentTermDays !== undefined) sale.paymentTermDays = body.paymentTermDays;
   if (body.remarks !== undefined || body.internalRemarks !== undefined) {
     sale.remarks = body.remarks ?? body.internalRemarks;
+  }
+  if (body.paymentMethod !== undefined || body.payment?.paymentMethod !== undefined) {
+    sale.paymentMethod = pickSalePaymentMethod(body);
+  }
+  if (body.referenceNumber !== undefined || body.payment?.referenceNumber !== undefined) {
+    sale.referenceNumber = pickSaleReferenceNumber(body) || '';
   }
 
   if (body.lineItems) {
@@ -1616,6 +1642,8 @@ async function updateSale(id, body, req) {
       'paymentAccountId',
       'paidFromAccountId',
       'payment',
+      'paymentMethod',
+      'referenceNumber',
     ].some((key) => body[key] !== undefined);
 
     if (wantsDraftEdit) {
@@ -1643,9 +1671,9 @@ async function updateSale(id, body, req) {
           customerId: customer._id,
           amount: sale.paidAmount,
           accountId: pickSaleAccountId(body),
-          paymentMethod: body.payment?.paymentMethod,
+          paymentMethod: pickSalePaymentMethod(body) || sale.paymentMethod,
           paymentDate: sale.invoiceDate,
-          referenceNumber: body.payment?.referenceNumber,
+          referenceNumber: pickSaleReferenceNumber(body) ?? sale.referenceNumber,
           userId: req.user._id,
         }, session);
       }
