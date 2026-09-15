@@ -4,7 +4,7 @@ const authorize = require('../middlewares/authorize');
 const validate = require('../middlewares/validate');
 const masters = require('../services/masters.service');
 const schemas = require('../validations/master.validation');
-const { customerLedgerController, supplierLedgerController } = require('../controllers/finance.controller');
+const { customerLedgerController, supplierLedgerController, accountLedgerController } = require('../controllers/finance.controller');
 
 const customers = createMasterRouter({
   moduleName: 'customers',
@@ -86,6 +86,19 @@ const accounts = createMasterRouter({
   schemas: schemas.account,
   allowDelete: false,
 });
+
+accounts.get(
+  '/:id/ledger',
+  authorize('accounts.read'),
+  validate(schemas.account.idParam),
+  accountLedgerController.getLedger
+);
+accounts.get(
+  '/:id/transactions',
+  authorize('accounts.read'),
+  validate(schemas.account.history),
+  accountLedgerController.listTransactions
+);
 
 const expenseCategories = createMasterRouter({
   moduleName: 'expense-categories',

@@ -1,7 +1,7 @@
 const { createMasterController } = require('./master.controller');
 const asyncHandler = require('../utils/asyncHandler');
 const { send } = require('../utils/apiResponse');
-const { sale, salesReturn, payment, expense, customerLedger, supplierLedger } = require('../services/finance.service');
+const { sale, salesReturn, payment, expense, customerLedger, supplierLedger, accountLedger } = require('../services/finance.service');
 
 const saleController = createMasterController(sale, { singular: 'Sale', plural: 'Sales' });
 const salesReturnController = createMasterController(salesReturn, {
@@ -45,6 +45,18 @@ const supplierLedgerController = {
   }),
 };
 
+const accountLedgerController = {
+  getLedger: asyncHandler(async (req, res) => {
+    const data = await accountLedger.getSummary(req.params.id);
+    send(res, 200, 'Account ledger fetched', data);
+  }),
+  listTransactions: asyncHandler(async (req, res) => {
+    const query = req.validated?.query || req.query;
+    const data = await accountLedger.listTransactions(req.params.id, query);
+    send(res, 200, 'Account transactions fetched', data);
+  }),
+};
+
 module.exports = {
   saleController,
   salesReturnController,
@@ -52,4 +64,5 @@ module.exports = {
   expenseController,
   customerLedgerController,
   supplierLedgerController,
+  accountLedgerController,
 };

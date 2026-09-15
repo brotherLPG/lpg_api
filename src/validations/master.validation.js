@@ -336,6 +336,20 @@ const account = {
     status: z.enum(ACCOUNT_RECORD_STATUS_VALUES).optional(),
   }),
   idParam: idParamSchema,
+  history: z.object({
+    params: z.object({ id: objectId }),
+    query: paginationQuery.extend({
+      search: z.string().optional(),
+      startDate: z.coerce.date().optional(),
+      endDate: z.coerce.date().optional(),
+      fromDate: z.coerce.date().optional(),
+      toDate: z.coerce.date().optional(),
+      direction: z.enum(['inward', 'outward']).optional(),
+      source: z.enum(['payment', 'expense']).optional(),
+      paymentType: z.enum(['receive', 'pay', 'refund', 'expense']).optional(),
+      status: z.string().optional(),
+    }),
+  }),
 };
 
 const expenseCategory = {

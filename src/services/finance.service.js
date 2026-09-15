@@ -29,6 +29,7 @@ const {
   PAYMENT_DIRECTION_OPTIONS,
   PAYMENT_VOUCHER_STATUSES,
   EXPENSE_STATUSES,
+  ACCOUNT_TYPE_OPTIONS,
 } = require('../constants/masters');
 
 const SALE_POPULATE = [
@@ -2590,4 +2591,256 @@ const supplierLedger = {
   listPayments: getSupplierPaymentHistory,
 };
 
-module.exports = { sale, salesReturn, payment, expense, customerLedger, supplierLedger };
+function accountDirectionOf(paymentType) {
+  return paymentType === 'receive' ? 'inward' : 'outward';
+}
+
+function accountDirectionLabelOf(paymentType) {
+  if (paymentType === 'receive') return 'Customer Receipt (Inward)';
+  if (paymentType === 'pay') return 'Supplier Payment (Outward)';
+  if (paymentType === 'refund') return 'Customer Refund (Outward)';
+  return 'Expense (Outward)';
+}
+
+async function loadAccountForLedger(accountId) {
+  const account = await Account.findById(accountId)
+    .populate('parentAccountId', 'accountCode accountName accountType')
+    .lean();
+  if (!account) {
+    throw new ApiError(404, 'Account not found');
+  }
+  return account;
+}
+
+function toAccountLedgerProfile(account) {
+  const parent = account.parentAccountId && typeof account.parentAccountId === 'object'
+    ? account.parentAccountId
+    : null;
+  return {
+    _id: account._id,
+    accountCode: account.accountCode,
+    accountName: account.accountName,
+    accountType: account.accountType,
+    accountTypeLabel: ACCOUNT_TYPE_OPTIONS.find((item) => item.value === account.accountType)?.label
+      || account.accountType,
+    accountCategory: account.accountCategory || 'operating',
+    parentAccountId: parent?._id || account.parentAccountId || null,
+    parentAccountName: parent?.accountName || '',
+    parentAccountCode: parent?.accountCode || '',
+    bankName: account.bankName || '',
+    branchName: account.branchName || '',
+    accountNumber: account.accountNumber || '',
+    ibanOrSwift: account.ibanOrSwift || '',
+    description: account.description || '',
+    isActive: account.isActive !== false,
+    accountStatus: account.isActive !== false ? 'Active' : 'Inactive',
+    allowManualEntries: account.allowManualEntries !== false,
+    isPrimary: Boolean(account.isPrimary),
+    openingBalanceAmount: roundMoney(account.openingBalanceAmount),
+    currentBalanceAmount: roundMoney(account.currentBalanceAmount),
+    openedAt: account.openedAt || null,
+  };
+}
+
+function paymentToAccountTransaction(doc) {
+  const item = toPaymentItem(doc);
+  const invoices = item.allocations.map((line) => line.invoiceNumber).filter(Boolean);
+  const amount = roundMoney(item.paymentAmount);
+  const direction = accountDirectionOf(item.paymentType);
+  const skip = item.paymentStatus === 'pending';
+  return {
+    _id: item._id,
+    source: 'payment',
+    sourceId: item._id,
+    transactionNumber: item.paymentNumber,
+    transactionDate: item.paymentDate,
+    direction,
+    directionLabel: accountDirectionLabelOf(item.paymentType),
+    paymentType: item.paymentType,
+    paymentTypeLabel: accountDirectionLabelOf(item.paymentType),
+    partyType: item.partyType,
+    partyId: item.customerId || item.supplierId || null,
+    partyName: item.partyName || '',
+    partyCode: item.partyCode || '',
+    amount,
+    inwardAmount: direction === 'inward' ? amount : 0,
+    outwardAmount: direction === 'outward' ? amount : 0,
+    paymentMethod: item.paymentMethod,
+    paymentMethodLabel: item.paymentMethodLabel,
+    referenceNumber: item.referenceNumber || '',
+    remarks: item.remarks || '',
+    status: item.paymentStatus,
+    statusLabel: item.paymentStatusLabel,
+    appliedToInvoice: invoices.join(', '),
+    appliedToInvoices: invoices,
+    skip,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  };
+}
+
+function expenseToAccountTransaction(doc) {
+  const item = toExpenseItem(doc);
+  const amount = roundMoney(item.expenseAmount);
+  const skip = item.expenseStatus === 'pending';
+  return {
+    _id: item._id,
+    source: 'expense',
+    sourceId: item._id,
+    transactionNumber: item.expenseNumber,
+    transactionDate: item.expenseDate,
+    direction: 'outward',
+    directionLabel: accountDirectionLabelOf('expense'),
+    paymentType: 'expense',
+    paymentTypeLabel: 'Expense',
+    partyType: item.vendorPayeeName ? 'vendor' : null,
+    partyId: null,
+    partyName: item.vendorPayeeName || item.categoryName || '',
+    partyCode: item.categoryCode || '',
+    amount,
+    inwardAmount: 0,
+    outwardAmount: amount,
+    paymentMethod: item.paymentMethod,
+    paymentMethodLabel: item.paymentMethodLabel,
+    referenceNumber: item.referenceNumber || '',
+    remarks: item.remarks || item.expenseDescription || '',
+    status: item.expenseStatus,
+    statusLabel: item.expenseStatusLabel,
+    appliedToInvoice: '',
+    appliedToInvoices: [],
+    skip,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  };
+}
+
+function applyAccountTransactionBalances(account, transactions) {
+  const events = transactions.map((item) => ({
+    ...item,
+    at: eventTimestamp(item.transactionDate, item.createdAt),
+  }));
+  events.sort((left, right) => (
+    left.at - right.at
+    || new Date(left.createdAt || 0) - new Date(right.createdAt || 0)
+  ));
+
+  let running = roundMoney(account.openingBalanceAmount);
+  return events.map((item) => {
+    if (!item.skip) {
+      running = item.direction === 'inward'
+        ? roundMoney(running + item.amount)
+        : roundMoney(running - item.amount);
+    }
+    const { skip, at, ...rest } = item;
+    return withAfterBalance(rest, rest._id, { [String(rest._id)]: running });
+  });
+}
+
+function matchesAccountTransactionFilters(item, query = {}) {
+  if (query.direction && item.direction !== query.direction) return false;
+  if (query.source && item.source !== query.source) return false;
+  if (query.paymentType && item.paymentType !== query.paymentType) return false;
+  if ((query.status || query.paymentStatus) && item.status !== (query.status || query.paymentStatus)) {
+    return false;
+  }
+
+  const startDate = query.startDate || query.fromDate;
+  const endDate = query.endDate || query.toDate;
+  if (startDate || endDate) {
+    const at = new Date(item.transactionDate || item.createdAt || 0).getTime();
+    if (startDate && at < new Date(startDate).getTime()) return false;
+    if (endDate) {
+      const end = new Date(endDate);
+      if (end.getHours() === 0 && end.getMinutes() === 0 && end.getSeconds() === 0 && end.getMilliseconds() === 0) {
+        end.setHours(23, 59, 59, 999);
+      }
+      if (at > end.getTime()) return false;
+    }
+  }
+
+  if (query.search) {
+    const needle = query.search.trim().toLowerCase();
+    const haystack = [
+      item.transactionNumber,
+      item.partyName,
+      item.partyCode,
+      item.referenceNumber,
+      item.remarks,
+      item.appliedToInvoice,
+      item.directionLabel,
+    ].join(' ').toLowerCase();
+    if (!haystack.includes(needle)) return false;
+  }
+
+  return true;
+}
+
+async function collectAccountTransactions(accountId) {
+  const account = await loadAccountForLedger(accountId);
+  const id = asObjectId(account._id);
+  const [payments, expenses] = await Promise.all([
+    populateQuery(Payment.find({ accountId: id }), PAYMENT_POPULATE).lean(),
+    populateQuery(Expense.find({ paidFromAccountId: id }), EXPENSE_POPULATE).lean(),
+  ]);
+
+  const transactions = applyAccountTransactionBalances(account, [
+    ...payments.map(paymentToAccountTransaction),
+    ...expenses.map(expenseToAccountTransaction),
+  ]);
+
+  return { account, transactions };
+}
+
+async function getAccountLedger(accountId) {
+  const { account, transactions } = await collectAccountTransactions(accountId);
+  const posted = transactions.filter((item) => item.status !== 'pending');
+  const inward = posted.filter((item) => item.direction === 'inward');
+  const outward = posted.filter((item) => item.direction === 'outward');
+  const last = [...posted].sort((left, right) => (
+    eventTimestamp(right.transactionDate, right.createdAt) - eventTimestamp(left.transactionDate, left.createdAt)
+  ))[0] || null;
+
+  const totalInward = roundMoney(inward.reduce((sum, item) => sum + item.amount, 0));
+  const totalOutward = roundMoney(outward.reduce((sum, item) => sum + item.amount, 0));
+
+  return {
+    account: toAccountLedgerProfile(account),
+    summary: {
+      openingBalanceAmount: roundMoney(account.openingBalanceAmount),
+      currentBalanceAmount: roundMoney(account.currentBalanceAmount),
+      totalInward,
+      totalOutward,
+      netMovement: roundMoney(totalInward - totalOutward),
+      inwardCount: inward.length,
+      outwardCount: outward.length,
+      transactionCount: posted.length,
+      lastTransactionAmount: last ? last.amount : 0,
+      lastTransactionDate: last?.transactionDate || null,
+      lastTransactionNumber: last?.transactionNumber || null,
+      lastTransactionDirection: last?.direction || null,
+      lastTransactionDirectionLabel: last?.directionLabel || null,
+    },
+  };
+}
+
+async function getAccountTransactions(accountId, query = {}) {
+  const { account, transactions } = await collectAccountTransactions(accountId);
+  const filtered = transactions
+    .filter((item) => matchesAccountTransactionFilters(item, query))
+    .sort((left, right) => (
+      eventTimestamp(right.transactionDate, right.createdAt) - eventTimestamp(left.transactionDate, left.createdAt)
+    ));
+
+  const { page, limit, skip } = parsePagination(query);
+  return {
+    account: toAccountLedgerProfile(account),
+    ...paginated(filtered.slice(skip, skip + limit), filtered.length, page, limit),
+  };
+}
+
+const accountLedger = {
+  getSummary: getAccountLedger,
+  listTransactions: getAccountTransactions,
+};
+
+module.exports = { sale, salesReturn, payment, expense, customerLedger, supplierLedger, accountLedger };
