@@ -48,6 +48,16 @@ const salesReturnSchema = new mongoose.Schema(
       type: String,
       default: 'credit-customer-ledger',
     },
+    refundAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    refundPaymentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Payment',
+      default: null,
+    },
     processedByUserId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

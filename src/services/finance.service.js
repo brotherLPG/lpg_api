@@ -40,9 +40,10 @@ const SALE_POPULATE = [
 
 const RETURN_POPULATE = [
   { path: 'customerId', select: 'customerCode customerName' },
-  { path: 'originalSaleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount saleStatus' },
+  { path: 'originalSaleId', select: 'invoiceNumber totalAmount paidAmount outstandingAmount saleStatus paymentStatus' },
   { path: 'processedByUserId', select: 'fullName emailAddress' },
   { path: 'returnItems.inventoryItemId', select: 'itemCode itemName itemCategory' },
+  { path: 'refundPaymentId', select: 'paymentNumber paymentAmount paymentMethod paymentDate' },
 ];
 
 const PAYMENT_POPULATE = [
@@ -371,6 +372,7 @@ function toSaleItem(sale) {
     paidAmount: roundMoney(sale.paidAmount),
     returnedAmount: roundMoney(sale.returnedAmount),
     outstandingAmount: roundMoney(sale.outstandingAmount),
+    refundDueAmount: roundMoney(Math.max(0, -(sale.outstandingAmount || 0))),
     paymentStatus: sale.paymentStatus,
     paymentStatusLabel: paymentStatusLabel(sale.paymentStatus),
     paymentMethod: sale.paymentMethod || '',
@@ -480,6 +482,146 @@ async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMet
     { session }
   );
   return account;
+}
+
+async function postSaleRefund({
+  sale,
+  customerId,
+  amount,
+  accountId,
+  paymentMethod,
+  paymentDate,
+  referenceNumber,
+  userId,
+  remarks,
+}, session) {
+  const account = await resolveReceiveAccount(accountId, session);
+  if (amount > sale.paidAmount) {
+    throw new ApiError(400, 'Refund exceeds paid amount');
+  }
+  const refundDue = sale.outstandingAmount < 0 ? roundMoney(-sale.outstandingAmount) : 0;
+  if (refundDue <= 0) {
+    throw new ApiError(400, 'No refund due on this sale');
+  }
+  if (amount > refundDue) {
+    throw new ApiError(400, `Refund exceeds refund due (${formatRs(refundDue)})`);
+  }
+
+  await changeAccount(account._id, -amount, session);
+  await applySalePayment(sale, -amount, session);
+
+  const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
+  const [payment] = await Payment.create(
+    [
+      {
+        paymentNumber,
+        paymentType: 'refund',
+        customerId,
+        saleId: sale._id,
+        allocations: [{ saleId: sale._id, amountApplied: amount }],
+        accountId: account._id,
+        paymentAmount: amount,
+        paymentMethod: paymentMethodForAccount(account, paymentMethod),
+        paymentDate: resolveBusinessDate(paymentDate, sale.invoiceDate),
+        referenceNumber: referenceNumber || '',
+        remarks: remarks || `Refund for ${sale.invoiceNumber}`,
+        receivedOrPaidByUserId: userId,
+      },
+    ],
+    { session }
+  );
+  return payment;
+}
+
+async function listCustomerCreditSales(customerId, session, excludeSaleId) {
+  const filter = {
+    customerId,
+    saleStatus: { $nin: ['draft', 'cancelled'] },
+    outstandingAmount: { $lt: 0 },
+  };
+  if (excludeSaleId) filter._id = { $ne: excludeSaleId };
+  let query = Sale.find(filter).sort({ invoiceDate: 1, createdAt: 1 });
+  if (session) query = query.session(session);
+  return query;
+}
+
+async function customerCreditAvailable(customerId, session, excludeSaleId) {
+  const sales = await listCustomerCreditSales(customerId, session, excludeSaleId);
+  return roundMoney(sales.reduce((sum, sale) => sum + Math.max(0, -sale.outstandingAmount), 0));
+}
+
+async function applyCustomerCreditToSale(sale, customerId, options, session) {
+  const applyCredit = options?.applyCredit !== false;
+  if (!applyCredit) {
+    return { appliedAmount: 0, applications: [] };
+  }
+
+  let remainingNeed = roundMoney(Math.max(0, sale.outstandingAmount));
+  if (remainingNeed <= 0) {
+    return { appliedAmount: 0, applications: [] };
+  }
+
+  const creditSales = await listCustomerCreditSales(customerId, session, sale._id);
+  let available = roundMoney(
+    creditSales.reduce((sum, creditSale) => sum + Math.max(0, -creditSale.outstandingAmount), 0)
+  );
+  if (available <= 0) {
+    return { appliedAmount: 0, applications: [] };
+  }
+
+  let toApplyTotal = available;
+  if (options?.creditAmount !== undefined && options?.creditAmount !== null) {
+    toApplyTotal = roundMoney(Math.min(available, Number(options.creditAmount) || 0));
+  }
+  toApplyTotal = roundMoney(Math.min(toApplyTotal, remainingNeed));
+  if (toApplyTotal <= 0) {
+    return { appliedAmount: 0, applications: [] };
+  }
+
+  let left = toApplyTotal;
+  const applications = [];
+  for (const creditSale of creditSales) {
+    if (left <= 0) break;
+    const creditOnSale = roundMoney(Math.max(0, -creditSale.outstandingAmount));
+    const chunk = roundMoney(Math.min(creditOnSale, left));
+    if (chunk <= 0) continue;
+    await applySalePayment(creditSale, -chunk, session);
+    await applySalePayment(sale, chunk, session);
+    applications.push({
+      fromSaleId: creditSale._id,
+      fromInvoiceNumber: creditSale.invoiceNumber,
+      amount: chunk,
+    });
+    left = roundMoney(left - chunk);
+  }
+
+  if (applications.length) {
+    const note = applications
+      .map((item) => `${formatRs(item.amount)} credit from ${item.fromInvoiceNumber}`)
+      .join('; ');
+    const prefix = sale.remarks ? `${sale.remarks} | ` : '';
+    sale.remarks = `${prefix}Applied customer credit: ${note}`.slice(0, 500);
+    await sale.save({ session });
+  }
+
+  return { appliedAmount: toApplyTotal, applications };
+}
+
+function pickReturnRefundAccountId(body) {
+  return pickSaleAccountId(body);
+}
+
+function pickReturnRefundAmount(body, refundDue) {
+  if (body.refundAmount !== undefined && body.refundAmount !== null) {
+    return roundMoney(body.refundAmount);
+  }
+  if (body.payment?.paymentAmount !== undefined && body.payment?.paymentAmount !== null) {
+    return roundMoney(body.payment.paymentAmount);
+  }
+  if (body.refundNow === true) {
+    return refundDue;
+  }
+  return 0;
 }
 
 async function receiptAccountsBySaleIds(saleIds) {
@@ -636,9 +778,10 @@ async function getSaleById(id) {
   if (!doc) throw new ApiError(404, 'Sale not found');
   const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
   const [sale] = await attachReceiptAccounts([toSaleItem(plain)]);
+  const customerId = sale.customerId?._id || sale.customerId;
   return {
     ...sale,
-    form: await getSaleFormOptions({ id }),
+    form: await getSaleFormOptions(customerId ? { customerId } : {}),
   };
 }
 
@@ -777,7 +920,7 @@ async function listSales(query) {
   };
 }
 
-async function getSaleFormOptions() {
+async function getSaleFormOptions(query = {}) {
   const [nextSaleNumber, nextInvoice, customers, inventoryItems, accounts] = await Promise.all([
     nextSequentialCode(Sale, 'saleNumber', 'SAL', 3),
     nextInvoiceNumber(),
@@ -793,6 +936,15 @@ async function getSaleFormOptions() {
     loadActiveAccounts(),
   ]);
 
+  let customerCreditAmount = 0;
+  let refundDueInvoices = [];
+  if (query.customerId) {
+    [customerCreditAmount, refundDueInvoices] = await Promise.all([
+      customerCreditAvailable(query.customerId),
+      refundDueSalesForCustomer(query.customerId),
+    ]);
+  }
+
   return {
     nextSaleNumber,
     nextInvoiceNumber: nextInvoice,
@@ -802,6 +954,9 @@ async function getSaleFormOptions() {
     paymentTerms: PAYMENT_TERMS,
     saleTypes: SALE_TYPES,
     paymentMethods: PAYMENT_METHOD_OPTIONS,
+    customerCreditAmount,
+    refundDueInvoices,
+    applyCustomerCreditDefault: true,
     customers: customers.map((customer) => ({
       _id: customer._id,
       customerCode: customer.customerCode,
@@ -837,6 +992,7 @@ function returnReasonLabel(value) {
 function toReturnItem(doc) {
   const customer = doc.customerId && typeof doc.customerId === 'object' ? doc.customerId : null;
   const sale = doc.originalSaleId && typeof doc.originalSaleId === 'object' ? doc.originalSaleId : null;
+  const refundPayment = doc.refundPaymentId && typeof doc.refundPaymentId === 'object' ? doc.refundPaymentId : null;
   const returnItems = (doc.returnItems || []).map((line) => {
     const item = line.inventoryItemId && typeof line.inventoryItemId === 'object' ? line.inventoryItemId : null;
     return {
@@ -868,6 +1024,10 @@ function toReturnItem(doc) {
     itemCount: returnItems.length,
     itemQuantity: returnItems.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0),
     totalReturnAmount: roundMoney(doc.totalReturnAmount),
+    refundAmount: roundMoney(doc.refundAmount || 0),
+    refundPaymentId: refundPayment?._id || doc.refundPaymentId || null,
+    refundPaymentNumber: refundPayment?.paymentNumber || '',
+    refundedNow: roundMoney(doc.refundAmount || 0) > 0,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
@@ -925,7 +1085,11 @@ async function originalSalePreview(sale) {
     customerCode: customer?.customerCode || '',
     totalAmount: roundMoney(sale.totalAmount),
     paidAmount: roundMoney(sale.paidAmount),
+    returnedAmount: roundMoney(sale.returnedAmount || 0),
     outstandingAmount: roundMoney(sale.outstandingAmount),
+    refundDueAmount: roundMoney(Math.max(0, -(sale.outstandingAmount || 0))),
+    paymentStatus: sale.paymentStatus,
+    paymentStatusLabel: paymentStatusLabel(sale.paymentStatus),
     itemCount: lineItems.length,
     lineItems,
   };
@@ -972,12 +1136,13 @@ async function listReturns(query) {
 
 async function getReturnFormOptions(query = {}) {
   const customerFilter = { isActive: true };
-  const [nextNumber, customers] = await Promise.all([
+  const [nextNumber, customers, accounts] = await Promise.all([
     nextReturnNumber(),
     Customer.find(customerFilter)
       .select('customerCode customerName phoneNumber')
       .sort({ customerName: 1 })
       .lean(),
+    loadActiveAccounts(),
   ]);
 
   const invoiceFilter = { saleStatus: { $nin: ['draft', 'cancelled'] } };
@@ -986,7 +1151,7 @@ async function getReturnFormOptions(query = {}) {
   const invoices = query.customerId
     ? await Sale.find(invoiceFilter)
       .populate('customerId', 'customerCode customerName')
-      .select('invoiceNumber saleNumber invoiceDate totalAmount customerId saleStatus')
+      .select('invoiceNumber saleNumber invoiceDate totalAmount customerId saleStatus outstandingAmount paymentStatus')
       .sort({ invoiceDate: -1 })
       .limit(50)
       .lean()
@@ -1010,6 +1175,8 @@ async function getReturnFormOptions(query = {}) {
     nextReturnNumber: nextNumber,
     returnReasons: RETURN_REASONS,
     actionType: RETURN_ACTION_TYPE,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
+    accounts: accounts.map(mapAccountOption),
     customers: customers.map((customer) => ({
       _id: customer._id,
       customerCode: customer.customerCode,
@@ -1023,6 +1190,9 @@ async function getReturnFormOptions(query = {}) {
       saleNumber: sale.saleNumber || sale.invoiceNumber,
       invoiceDate: sale.invoiceDate,
       totalAmount: roundMoney(sale.totalAmount),
+      outstandingAmount: roundMoney(sale.outstandingAmount || 0),
+      refundDueAmount: roundMoney(Math.max(0, -(sale.outstandingAmount || 0))),
+      paymentStatus: sale.paymentStatus || '',
       customerId: sale.customerId?._id || sale.customerId,
       customerName: sale.customerId?.customerName || '',
       label: `${sale.invoiceNumber} – ${sale.customerId?.customerName || ''}`.trim(),
@@ -1225,6 +1395,33 @@ async function outstandingSalesForCustomer(customerId) {
   }));
 }
 
+async function refundDueSalesForCustomer(customerId) {
+  const sales = await Sale.find({
+    customerId,
+    saleStatus: { $nin: ['draft', 'cancelled'] },
+    outstandingAmount: { $lt: 0 },
+  })
+    .select('invoiceNumber saleNumber invoiceDate totalAmount outstandingAmount paidAmount paymentStatus')
+    .sort({ invoiceDate: 1, createdAt: 1 })
+    .lean();
+
+  return sales.map((sale) => {
+    const refundDueAmount = roundMoney(-sale.outstandingAmount);
+    return {
+      _id: sale._id,
+      invoiceNumber: sale.invoiceNumber,
+      saleNumber: sale.saleNumber || sale.invoiceNumber,
+      invoiceDate: sale.invoiceDate,
+      totalAmount: roundMoney(sale.totalAmount),
+      outstandingAmount: roundMoney(sale.outstandingAmount),
+      refundDueAmount,
+      paidAmount: roundMoney(sale.paidAmount),
+      paymentStatus: sale.paymentStatus,
+      label: `${sale.invoiceNumber} – Refund due ${formatRs(refundDueAmount)}`,
+    };
+  });
+}
+
 async function outstandingReceiptsForSupplier(supplierId) {
   await backfillReceiptPaymentBalances({ supplierId });
   const receipts = await LPGReceipt.find({
@@ -1333,7 +1530,16 @@ async function loadAndValidateAllocations(allocations, { customerId, supplierId,
     if (customerId && String(sale.customerId) !== String(customerId)) {
       throw new ApiError(400, 'Allocated invoice does not belong to the selected customer');
     }
-    if (alloc.amountApplied > sale.outstandingAmount) {
+    if (paymentType === 'refund') {
+      const refundDue = sale.outstandingAmount < 0 ? roundMoney(-sale.outstandingAmount) : 0;
+      if (refundDue <= 0) {
+        throw new ApiError(400, `No refund due on ${sale.invoiceNumber}`);
+      }
+      const maxRefundable = roundMoney(Math.min(sale.paidAmount || 0, refundDue));
+      if (alloc.amountApplied > maxRefundable) {
+        throw new ApiError(400, `Refund exceeds refund due on ${sale.invoiceNumber}`);
+      }
+    } else if (alloc.amountApplied > sale.outstandingAmount) {
       throw new ApiError(400, `Payment exceeds outstanding amount on ${sale.invoiceNumber}`);
     }
     loaded.push({ sale, amountApplied: alloc.amountApplied });
@@ -1473,11 +1679,18 @@ async function getPaymentFormOptions(query = {}) {
   let ledgerBalance = 0;
   let outstandingInvoices = [];
   let outstandingReceipts = [];
+  let refundDueInvoices = [];
+  let customerCreditAmount = 0;
   if (query.customerId) {
-    [ledgerBalance, outstandingInvoices] = await Promise.all([
+    [ledgerBalance, outstandingInvoices, refundDueInvoices, customerCreditAmount] = await Promise.all([
       customerLedgerOutstanding(query.customerId),
       outstandingSalesForCustomer(query.customerId),
+      refundDueSalesForCustomer(query.customerId),
+      customerCreditAvailable(query.customerId),
     ]);
+    if (paymentType === 'refund') {
+      outstandingInvoices = refundDueInvoices;
+    }
   } else if (query.supplierId) {
     [ledgerBalance, outstandingReceipts] = await Promise.all([
       supplierLedgerOutstanding(query.supplierId),
@@ -1496,7 +1709,9 @@ async function getPaymentFormOptions(query = {}) {
     ledgerBalanceLabel: query.customerId || query.supplierId
       ? `${formatRs(ledgerBalance)} Outstanding`
       : '',
+    customerCreditAmount,
     outstandingInvoices,
+    refundDueInvoices,
     outstandingReceipts,
     customers: customers.map((customer) => ({
       _id: customer._id,
@@ -1702,14 +1917,30 @@ async function createSale(body, req) {
     const lineItems = await buildSaleLines(body.lineItems, session);
     const totals = totalsFromLines(lineItems, body.tradeDiscountAmount);
     const amountPaid = roundMoney(body.amountPaid ?? body.payment?.paymentAmount ?? 0);
-    if (amountPaid > totals.totalAmount) {
-      throw new ApiError(400, 'Amount paid cannot exceed sale total');
+    const applyCredit = !isDraft && body.applyCustomerCredit !== false;
+    let creditToApply = 0;
+    if (applyCredit) {
+      creditToApply = await customerCreditAvailable(customer._id, session);
+      if (body.applyCustomerCreditAmount !== undefined && body.applyCustomerCreditAmount !== null) {
+        creditToApply = roundMoney(Math.min(creditToApply, Number(body.applyCustomerCreditAmount) || 0));
+      }
+      creditToApply = roundMoney(Math.min(creditToApply, totals.totalAmount));
     }
 
-    const balances = deriveBalances(totals.totalAmount, amountPaid, 0);
-    const saleType = balances.outstandingAmount > 0 ? 'credit' : 'cash';
-    if (!isDraft && balances.outstandingAmount > 0) {
-      await assertCreditLimit(customer, balances.outstandingAmount, session);
+    const maxCash = roundMoney(totals.totalAmount - creditToApply);
+    if (amountPaid > maxCash) {
+      throw new ApiError(
+        400,
+        creditToApply > 0
+          ? `Amount paid cannot exceed ${formatRs(maxCash)} after applying customer credit ${formatRs(creditToApply)}`
+          : 'Amount paid cannot exceed sale total'
+      );
+    }
+
+    const projectedOutstanding = roundMoney(totals.totalAmount - amountPaid - creditToApply);
+    const saleType = projectedOutstanding > 0 ? 'credit' : 'cash';
+    if (!isDraft && projectedOutstanding > 0) {
+      await assertCreditLimit(customer, projectedOutstanding, session);
     }
 
     if (!isDraft) {
@@ -1723,6 +1954,7 @@ async function createSale(body, req) {
       ? await assignNumber(Sale, 'invoiceNumber', 'INV', body.invoiceNumber, session)
       : await nextInvoiceNumber(session);
 
+    const initialBalances = deriveBalances(totals.totalAmount, amountPaid, 0);
     const [sale] = await Sale.create(
       [
         {
@@ -1736,8 +1968,8 @@ async function createSale(body, req) {
           ...totals,
           paidAmount: amountPaid,
           returnedAmount: 0,
-          outstandingAmount: balances.outstandingAmount,
-          paymentStatus: balances.paymentStatus,
+          outstandingAmount: initialBalances.outstandingAmount,
+          paymentStatus: initialBalances.paymentStatus,
           saleStatus: isDraft ? 'draft' : 'confirmed',
           paymentMethod: pickSalePaymentMethod(body),
           referenceNumber: pickSaleReferenceNumber(body) || '',
@@ -1761,6 +1993,15 @@ async function createSale(body, req) {
       }, session);
     }
 
+    if (!isDraft && applyCredit) {
+      await applyCustomerCreditToSale(sale, customer._id, {
+        applyCredit: true,
+        creditAmount: body.applyCustomerCreditAmount,
+      }, session);
+      sale.saleType = sale.outstandingAmount > 0 ? 'credit' : 'cash';
+      await sale.save({ session });
+    }
+
     await writeAudit({
       req,
       session,
@@ -1774,6 +2015,7 @@ async function createSale(body, req) {
         totalAmount: sale.totalAmount,
         paidAmount: sale.paidAmount,
         saleStatus: sale.saleStatus,
+        creditAppliedAmount: creditToApply,
       },
     });
 
@@ -1867,8 +2109,18 @@ async function updateSale(id, body, req) {
         throw new ApiError(400, 'Only a draft sale can be confirmed');
       }
       const customer = await assertCustomer(sale.customerId, session);
-      if (sale.outstandingAmount > 0) {
-        await assertCreditLimit(customer, sale.outstandingAmount, session, sale._id);
+      const applyCredit = body.applyCustomerCredit !== false;
+      let creditToApply = 0;
+      if (applyCredit) {
+        creditToApply = await customerCreditAvailable(customer._id, session, sale._id);
+        if (body.applyCustomerCreditAmount !== undefined && body.applyCustomerCreditAmount !== null) {
+          creditToApply = roundMoney(Math.min(creditToApply, Number(body.applyCustomerCreditAmount) || 0));
+        }
+        creditToApply = roundMoney(Math.min(creditToApply, Math.max(0, sale.outstandingAmount)));
+      }
+      const projectedOutstanding = roundMoney(Math.max(0, sale.outstandingAmount) - creditToApply);
+      if (projectedOutstanding > 0) {
+        await assertCreditLimit(customer, projectedOutstanding, session, sale._id);
       }
       for (const line of sale.lineItems) {
         await changeStock(line.inventoryItemId, -line.quantity, session);
@@ -1886,6 +2138,14 @@ async function updateSale(id, body, req) {
         }, session);
       }
       sale.saleStatus = 'confirmed';
+      await sale.save({ session });
+      if (applyCredit) {
+        await applyCustomerCreditToSale(sale, customer._id, {
+          applyCredit: true,
+          creditAmount: body.applyCustomerCreditAmount,
+        }, session);
+        sale.saleType = sale.outstandingAmount > 0 ? 'credit' : 'cash';
+      }
     }
 
     if (body.saleStatus === 'cancelled') {
@@ -2007,6 +2267,8 @@ async function createReturn(body, req) {
           returnReason: body.returnReason,
           inspectionNotes: body.inspectionNotes || '',
           adjustmentType: RETURN_ACTION_TYPE.value,
+          refundAmount: 0,
+          refundPaymentId: null,
           processedByUserId: req.user._id,
         },
       ],
@@ -2020,6 +2282,37 @@ async function createReturn(body, req) {
     sale.saleStatus = deriveSaleStatus(sale.returnedAmount, sale.totalAmount, sale.saleStatus);
     await sale.save({ session });
 
+    const refundDue = sale.outstandingAmount < 0 ? roundMoney(-sale.outstandingAmount) : 0;
+    const refundAmount = pickReturnRefundAmount(body, refundDue);
+    const wantsRefund = body.refundNow === true || refundAmount > 0;
+    if (wantsRefund) {
+      if (refundDue <= 0) {
+        throw new ApiError(400, 'No refund due after this return');
+      }
+      if (refundAmount <= 0) {
+        throw new ApiError(400, 'refundAmount must be greater than 0');
+      }
+      if (refundAmount > refundDue) {
+        throw new ApiError(400, `Refund exceeds refund due (${formatRs(refundDue)})`);
+      }
+
+      const refundPayment = await postSaleRefund({
+        sale,
+        customerId,
+        amount: refundAmount,
+        accountId: pickReturnRefundAccountId(body),
+        paymentMethod: body.paymentMethod || body.payment?.paymentMethod,
+        paymentDate: body.returnDate,
+        referenceNumber: body.referenceNumber || body.payment?.referenceNumber,
+        userId: req.user._id,
+        remarks: `Refund for return ${returnNumber} on ${sale.invoiceNumber}`,
+      }, session);
+
+      doc.refundAmount = refundAmount;
+      doc.refundPaymentId = refundPayment._id;
+      await doc.save({ session });
+    }
+
     await writeAudit({
       req,
       session,
@@ -2027,7 +2320,13 @@ async function createReturn(body, req) {
       moduleName: 'sales-returns',
       entityName: 'SalesReturn',
       entityId: doc._id,
-      newValues: { returnNumber, totalReturnAmount, originalSaleId: sale._id },
+      newValues: {
+        returnNumber,
+        totalReturnAmount,
+        originalSaleId: sale._id,
+        refundAmount: doc.refundAmount || 0,
+        refundPaymentId: doc.refundPaymentId || null,
+      },
     });
 
     return doc._id;
@@ -2536,6 +2835,7 @@ async function getCustomerLedger(customerId) {
       totalPurchases: roundMoney(purchaseRow[0]?.total),
       salesCount: purchaseRow[0]?.count || 0,
       outstandingBalance,
+      customerCreditAmount: roundMoney(Math.max(0, -outstandingBalance)),
       lastPaymentAmount: lastPayment ? roundMoney(lastPayment.paymentAmount) : 0,
       lastPaymentDate: lastPayment?.paymentDate || null,
       lastPaymentNumber: lastPayment?.paymentNumber || null,

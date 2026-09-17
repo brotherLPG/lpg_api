@@ -76,6 +76,8 @@ const sale = {
       lineItems: z.array(saleLine).min(1),
       tradeDiscountAmount: nonNegative.optional(),
       amountPaid: nonNegative.optional(),
+      applyCustomerCredit: z.boolean().optional(),
+      applyCustomerCreditAmount: nonNegative.optional(),
       ...saleAccountFields,
       ...salePaymentMetaFields,
       remarks: z.string().trim().max(500).optional(),
@@ -94,6 +96,8 @@ const sale = {
         lineItems: z.array(saleLine).min(1).optional(),
         tradeDiscountAmount: nonNegative.optional(),
         amountPaid: nonNegative.optional(),
+        applyCustomerCredit: z.boolean().optional(),
+        applyCustomerCreditAmount: nonNegative.optional(),
         ...saleAccountFields,
         ...salePaymentMetaFields,
         remarks: z.string().trim().max(500).optional(),
@@ -134,6 +138,19 @@ const salesReturn = {
           quantity: positiveQty,
         })
       ).min(1),
+      refundNow: z.boolean().optional(),
+      refundAmount: nonNegative.optional(),
+      accountId: optionalAccountId,
+      paymentAccountId: optionalAccountId,
+      paidFromAccountId: optionalAccountId,
+      paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+      referenceNumber: z.string().trim().max(80).optional(),
+      payment: z.object({
+        accountId: optionalAccountId,
+        paymentAmount: nonNegative.optional(),
+        paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+        referenceNumber: z.string().trim().max(80).optional(),
+      }).optional(),
     }).superRefine((data, ctx) => {
       if (!data.originalSaleId && !data.originalInvoiceNumber) {
         ctx.addIssue({
@@ -141,6 +158,19 @@ const salesReturn = {
           message: 'originalSaleId or originalInvoiceNumber is required',
           path: ['originalInvoiceNumber'],
         });
+      }
+      const wantsRefund = data.refundNow === true
+        || (data.refundAmount !== undefined && data.refundAmount > 0)
+        || (data.payment?.paymentAmount !== undefined && data.payment.paymentAmount > 0);
+      if (wantsRefund) {
+        const accountId = data.accountId || data.paymentAccountId || data.paidFromAccountId || data.payment?.accountId;
+        if (!accountId) {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'accountId is required when refunding on return',
+            path: ['accountId'],
+          });
+        }
       }
     }),
   }),
