@@ -88,10 +88,7 @@ function eventTimestamp(date, createdAt) {
 }
 
 function newestPaymentFirst(left, right) {
-  return (
-    eventTimestamp(right.paymentDate, right.createdAt) - eventTimestamp(left.paymentDate, left.createdAt)
-    || new Date(right.createdAt || 0) - new Date(left.createdAt || 0)
-  );
+  return (usableTimestamp(right.createdAt) ?? 0) - (usableTimestamp(left.createdAt) ?? 0);
 }
 
 function coalesceBusinessDate(...values) {
