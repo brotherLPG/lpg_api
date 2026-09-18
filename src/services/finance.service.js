@@ -3516,7 +3516,7 @@ async function getAccountTransactions(accountId, query = {}) {
   const filtered = transactions
     .filter((item) => matchesAccountTransactionFilters(item, query))
     .sort((left, right) => (
-      eventTimestamp(right.transactionDate, right.createdAt) - eventTimestamp(left.transactionDate, left.createdAt)
+      (usableTimestamp(right.createdAt) ?? 0) - (usableTimestamp(left.createdAt) ?? 0)
     ));
 
   const { page, limit, skip } = parsePagination(query);
