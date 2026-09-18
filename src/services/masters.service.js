@@ -1015,6 +1015,96 @@ async function assertFundingAccount(accountId) {
   return account;
 }
 
+function toOptionList(values) {
+  return values.map((value) => ({ value, label: titleCase(value) }));
+}
+
+function mapEmployeeOption(employee) {
+  return {
+    _id: employee._id,
+    employeeCode: employee.employeeCode,
+    fullName: employee.fullName,
+    jobTitle: employee.jobTitle || '',
+    departmentName: employee.departmentName || '',
+    employmentStatus: employee.employmentStatus || '',
+    label: `${employee.employeeCode} – ${employee.fullName}`,
+  };
+}
+
+function mapAccountFormOption(account) {
+  return {
+    _id: account._id,
+    accountCode: account.accountCode,
+    accountName: account.accountName,
+    accountType: account.accountType,
+    isPrimary: Boolean(account.isPrimary),
+    currentBalanceAmount: Number(account.currentBalanceAmount) || 0,
+    label: `${account.accountCode} – ${account.accountName}`,
+  };
+}
+
+async function loadAssignableEmployees() {
+  return Employee.find({ employmentStatus: { $ne: 'terminated' } })
+    .select('employeeCode fullName jobTitle departmentName employmentStatus')
+    .sort({ fullName: 1 })
+    .lean();
+}
+
+async function loadActiveAccountsForForms() {
+  return Account.find({ isActive: true })
+    .select('accountCode accountName accountType isPrimary currentBalanceAmount')
+    .sort({ isPrimary: -1, accountName: 1 })
+    .lean();
+}
+
+async function assetFormOptions() {
+  const [nextAssetCode, employees, accounts] = await Promise.all([
+    nextSequentialCode(Asset, 'assetCode', 'AST'),
+    loadAssignableEmployees(),
+    loadActiveAccountsForForms(),
+  ]);
+
+  return {
+    nextAssetCode,
+    assetCategories: toOptionList(ASSET_CATEGORIES),
+    assetStatuses: toOptionList(ASSET_STATUSES),
+    depreciationMethods: toOptionList(DEPRECIATION_METHODS),
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
+    employees: employees.map(mapEmployeeOption),
+    accounts: accounts.map(mapAccountFormOption),
+  };
+}
+
+async function maintenanceRecordFormOptions() {
+  const [nextMaintenanceNumber, assets, employees, accounts] = await Promise.all([
+    nextSequentialCode(MaintenanceRecord, 'maintenanceNumber', 'MNT'),
+    Asset.find({ assetStatus: { $ne: 'disposed' } })
+      .select('assetCode assetName assetCategory assetStatus locationName serialNumber')
+      .sort({ assetName: 1 })
+      .lean(),
+    loadAssignableEmployees(),
+    loadActiveAccountsForForms(),
+  ]);
+
+  return {
+    nextMaintenanceNumber,
+    maintenanceTypes: toOptionList(MAINTENANCE_TYPES),
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
+    assets: assets.map((item) => ({
+      _id: item._id,
+      assetCode: item.assetCode,
+      assetName: item.assetName,
+      assetCategory: item.assetCategory,
+      assetStatus: item.assetStatus,
+      locationName: item.locationName || '',
+      serialNumber: item.serialNumber || null,
+      label: `${item.assetCode} – ${item.assetName}`,
+    })),
+    employees: employees.map(mapEmployeeOption),
+    accounts: accounts.map(mapAccountFormOption),
+  };
+}
+
 function assertBookValue(payload, existing = {}) {
   const purchaseCostAmount = payload.purchaseCostAmount ?? existing.purchaseCostAmount ?? 0;
   const currentBookValueAmount = payload.currentBookValueAmount ?? existing.currentBookValueAmount ?? purchaseCostAmount;
@@ -1063,6 +1153,7 @@ const maintenanceRecord = createMasterService({
     maintenanceTypes: MAINTENANCE_TYPES,
     paymentMethods: PAYMENT_METHOD_OPTIONS,
   }),
+  formOptions: maintenanceRecordFormOptions,
   prepareCreate: async (body, req) => {
     const asset = await assertAssetForMaintenance(body.assetId);
     await assertWorkEmployee(body.performedByEmployeeId);
@@ -1120,6 +1211,7 @@ const asset = createMasterService({
     depreciationMethods: DEPRECIATION_METHODS,
     paymentMethods: PAYMENT_METHOD_OPTIONS,
   }),
+  formOptions: assetFormOptions,
   prepareCreate: async (body) => {
     await assertWorkEmployee(body.assignedEmployeeId);
     await assertFundingAccount(body.accountId);
