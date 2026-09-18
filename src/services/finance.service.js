@@ -10,6 +10,8 @@ const {
   Account,
   ExpenseCategory,
   LPGReceipt,
+  Asset,
+  MaintenanceRecord,
 } = require('../models');
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
@@ -3392,6 +3394,77 @@ function expenseToAccountTransaction(doc) {
   };
 }
 
+function assetToAccountTransaction(doc) {
+  const amount = roundMoney(doc.purchaseCostAmount);
+  const paymentMethod = doc.paymentMethod || 'cash';
+  const skip = !(doc.accountId && amount > 0);
+  return {
+    _id: doc._id,
+    source: 'asset',
+    sourceId: doc._id,
+    transactionNumber: doc.assetCode,
+    transactionDate: doc.purchaseDate || doc.createdAt,
+    direction: 'outward',
+    directionLabel: 'Asset Purchase (Outward)',
+    paymentType: 'asset',
+    paymentTypeLabel: 'Asset Purchase',
+    partyType: 'asset',
+    partyId: doc._id,
+    partyName: doc.assetName || '',
+    partyCode: doc.assetCode || '',
+    amount,
+    inwardAmount: 0,
+    outwardAmount: amount,
+    paymentMethod,
+    paymentMethodLabel: PAYMENT_METHOD_OPTIONS.find((item) => item.value === paymentMethod)?.label || paymentMethod,
+    referenceNumber: doc.serialNumber || '',
+    remarks: doc.locationName || '',
+    status: 'posted',
+    statusLabel: 'Posted',
+    appliedToInvoice: '',
+    appliedToInvoices: [],
+    skip,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
+function maintenanceToAccountTransaction(doc) {
+  const amount = roundMoney(doc.maintenanceCostAmount);
+  const paymentMethod = doc.paymentMethod || 'cash';
+  const asset = doc.assetId && typeof doc.assetId === 'object' ? doc.assetId : null;
+  const skip = !(doc.accountId && amount > 0);
+  return {
+    _id: doc._id,
+    source: 'maintenance',
+    sourceId: doc._id,
+    transactionNumber: doc.maintenanceNumber,
+    transactionDate: doc.maintenanceDate || doc.createdAt,
+    direction: 'outward',
+    directionLabel: 'Maintenance (Outward)',
+    paymentType: 'maintenance',
+    paymentTypeLabel: 'Maintenance',
+    partyType: 'asset',
+    partyId: asset?._id || doc.assetId || null,
+    partyName: asset?.assetName || '',
+    partyCode: asset?.assetCode || '',
+    amount,
+    inwardAmount: 0,
+    outwardAmount: amount,
+    paymentMethod,
+    paymentMethodLabel: PAYMENT_METHOD_OPTIONS.find((item) => item.value === paymentMethod)?.label || paymentMethod,
+    referenceNumber: '',
+    remarks: doc.workPerformed || doc.problemDescription || '',
+    status: 'posted',
+    statusLabel: 'Posted',
+    appliedToInvoice: '',
+    appliedToInvoices: [],
+    skip,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}
+
 function applyAccountTransactionBalances(account, transactions) {
   const events = transactions.map((item) => ({
     ...item,
@@ -3456,14 +3529,20 @@ function matchesAccountTransactionFilters(item, query = {}) {
 async function collectAccountTransactions(accountId) {
   const account = await loadAccountForLedger(accountId);
   const id = asObjectId(account._id);
-  const [payments, expenses] = await Promise.all([
+  const [payments, expenses, assets, maintenanceRecords] = await Promise.all([
     populateQuery(Payment.find({ accountId: id }), PAYMENT_POPULATE).lean(),
     populateQuery(Expense.find({ paidFromAccountId: id }), EXPENSE_POPULATE).lean(),
+    Asset.find({ accountId: id }).lean(),
+    MaintenanceRecord.find({ accountId: id })
+      .populate('assetId', 'assetCode assetName')
+      .lean(),
   ]);
 
   const transactions = applyAccountTransactionBalances(account, [
     ...payments.map(paymentToAccountTransaction),
     ...expenses.map(expenseToAccountTransaction),
+    ...assets.map(assetToAccountTransaction),
+    ...maintenanceRecords.map(maintenanceToAccountTransaction),
   ]);
 
   return { account, transactions };

@@ -992,8 +992,10 @@ async function assertWorkEmployee(employeeId) {
   return employee;
 }
 
-async function assertAssetForMaintenance(assetId) {
-  const asset = await Asset.findById(assetId);
+async function assertAssetForMaintenance(assetId, session) {
+  let query = Asset.findById(assetId);
+  if (session) query = query.session(session);
+  const asset = await query;
   if (!asset) {
     throw new ApiError(400, 'Asset not found');
   }
@@ -1003,9 +1005,11 @@ async function assertAssetForMaintenance(assetId) {
   return asset;
 }
 
-async function assertFundingAccount(accountId) {
+async function assertFundingAccount(accountId, session) {
   if (!accountId) return null;
-  const account = await Account.findById(accountId);
+  let query = Account.findById(accountId);
+  if (session) query = query.session(session);
+  const account = await query;
   if (!account) {
     throw new ApiError(400, 'Account not found');
   }
@@ -1013,6 +1017,51 @@ async function assertFundingAccount(accountId) {
     throw new ApiError(400, 'Account is inactive');
   }
   return account;
+}
+
+async function changeAccountBalance(accountId, delta, session) {
+  await assertFundingAccount(accountId, session);
+  if (delta < 0) {
+    const updated = await Account.findOneAndUpdate(
+      { _id: accountId, currentBalanceAmount: { $gte: -delta } },
+      { $inc: { currentBalanceAmount: delta } },
+      { new: true, session }
+    );
+    if (!updated) {
+      throw new ApiError(400, 'Account does not have enough balance');
+    }
+    return updated;
+  }
+  return Account.findByIdAndUpdate(
+    accountId,
+    { $inc: { currentBalanceAmount: delta } },
+    { new: true, session }
+  );
+}
+
+async function syncFundingPosting({
+  previousAccountId = null,
+  previousAmount = 0,
+  nextAccountId = null,
+  nextAmount = 0,
+}, session) {
+  const prevAmount = roundMoney(previousAmount);
+  const nextAmt = roundMoney(nextAmount);
+  const wasPosted = Boolean(previousAccountId) && prevAmount > 0;
+  const willPost = Boolean(nextAccountId) && nextAmt > 0;
+  const changed = wasPosted !== willPost
+    || (willPost && (String(previousAccountId) !== String(nextAccountId) || prevAmount !== nextAmt));
+
+  if (!changed) return false;
+
+  if (wasPosted) {
+    await changeAccountBalance(previousAccountId, prevAmount, session);
+  }
+  if (willPost) {
+    await changeAccountBalance(nextAccountId, -nextAmt, session);
+  }
+  cache.delByPrefix('accounts:');
+  return true;
 }
 
 function toOptionList(values) {
@@ -1154,34 +1203,53 @@ const maintenanceRecord = createMasterService({
     paymentMethods: PAYMENT_METHOD_OPTIONS,
   }),
   formOptions: maintenanceRecordFormOptions,
-  prepareCreate: async (body, req) => {
-    const asset = await assertAssetForMaintenance(body.assetId);
+  useTransaction: true,
+  prepareCreate: async (body, req, session) => {
+    const asset = await assertAssetForMaintenance(body.assetId, session);
     await assertWorkEmployee(body.performedByEmployeeId);
-    await assertFundingAccount(body.accountId);
+    await assertFundingAccount(body.accountId, session);
     if (!body.maintenanceDate) body.maintenanceDate = new Date();
     if (!body.paymentMethod) body.paymentMethod = 'cash';
     if (body.accountId === undefined) body.accountId = null;
+    body.maintenanceCostAmount = roundMoney(body.maintenanceCostAmount || 0);
     assertMaintenanceDates(body);
     body.approvedByUserId = req.user._id;
     if (['corrective', 'emergency'].includes(body.maintenanceType) && asset.assetStatus === 'in-use') {
       asset.assetStatus = 'under-maintenance';
-      await asset.save();
+      await asset.save(session ? { session } : undefined);
       cache.delByPrefix('assets:');
     }
     return body;
   },
-  prepareUpdate: async (body, doc) => {
+  prepareUpdate: async (body, doc, req, session) => {
     if (body.assetId) {
-      await assertAssetForMaintenance(body.assetId);
+      await assertAssetForMaintenance(body.assetId, session);
     }
     if (body.performedByEmployeeId) {
       await assertWorkEmployee(body.performedByEmployeeId);
     }
     if (body.accountId !== undefined) {
-      await assertFundingAccount(body.accountId);
+      await assertFundingAccount(body.accountId, session);
+    }
+    if (body.maintenanceCostAmount !== undefined) {
+      body.maintenanceCostAmount = roundMoney(body.maintenanceCostAmount || 0);
     }
     assertMaintenanceDates(body, doc);
     return body;
+  },
+  afterCreate: async (doc, payload, req, session) => {
+    await syncFundingPosting({
+      nextAccountId: payload.accountId,
+      nextAmount: payload.maintenanceCostAmount || 0,
+    }, session);
+  },
+  afterUpdate: async (doc, payload, previous, req, session) => {
+    await syncFundingPosting({
+      previousAccountId: previous.accountId,
+      previousAmount: previous.maintenanceCostAmount || 0,
+      nextAccountId: doc.accountId,
+      nextAmount: doc.maintenanceCostAmount || 0,
+    }, session);
   },
 });
 
@@ -1212,34 +1280,64 @@ const asset = createMasterService({
     paymentMethods: PAYMENT_METHOD_OPTIONS,
   }),
   formOptions: assetFormOptions,
-  prepareCreate: async (body) => {
+  useTransaction: true,
+  prepareCreate: async (body, req, session) => {
     await assertWorkEmployee(body.assignedEmployeeId);
-    await assertFundingAccount(body.accountId);
+    await assertFundingAccount(body.accountId, session);
     if (!body.serialNumber) body.serialNumber = null;
     if (!body.paymentMethod) body.paymentMethod = 'cash';
     if (body.accountId === undefined) body.accountId = null;
+    body.purchaseCostAmount = roundMoney(body.purchaseCostAmount || 0);
     if (body.currentBookValueAmount === undefined) {
-      body.currentBookValueAmount = body.purchaseCostAmount || 0;
+      body.currentBookValueAmount = body.purchaseCostAmount;
+    } else {
+      body.currentBookValueAmount = roundMoney(body.currentBookValueAmount);
     }
     assertBookValue(body);
     return body;
   },
-  prepareUpdate: async (body, doc) => {
+  prepareUpdate: async (body, doc, req, session) => {
     if (body.assignedEmployeeId !== undefined) {
       await assertWorkEmployee(body.assignedEmployeeId);
     }
     if (body.accountId !== undefined) {
-      await assertFundingAccount(body.accountId);
+      await assertFundingAccount(body.accountId, session);
     }
     if (body.serialNumber === '') body.serialNumber = null;
+    if (body.purchaseCostAmount !== undefined) {
+      body.purchaseCostAmount = roundMoney(body.purchaseCostAmount || 0);
+    }
+    if (body.currentBookValueAmount !== undefined) {
+      body.currentBookValueAmount = roundMoney(body.currentBookValueAmount);
+    }
     assertBookValue(body, doc);
     return body;
+  },
+  afterCreate: async (doc, payload, req, session) => {
+    await syncFundingPosting({
+      nextAccountId: payload.accountId,
+      nextAmount: payload.purchaseCostAmount || 0,
+    }, session);
+  },
+  afterUpdate: async (doc, payload, previous, req, session) => {
+    await syncFundingPosting({
+      previousAccountId: previous.accountId,
+      previousAmount: previous.purchaseCostAmount || 0,
+      nextAccountId: doc.accountId,
+      nextAmount: doc.purchaseCostAmount || 0,
+    }, session);
   },
   assertDelete: async (doc) => {
     const records = await MaintenanceRecord.countDocuments({ assetId: doc._id });
     if (records > 0) {
       throw new ApiError(400, 'Asset has maintenance records and cannot be deleted');
     }
+  },
+  beforeDelete: async (doc, req, session) => {
+    await syncFundingPosting({
+      previousAccountId: doc.accountId,
+      previousAmount: doc.purchaseCostAmount || 0,
+    }, session);
   },
 });
 

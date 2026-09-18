@@ -1,8 +1,22 @@
+const mongoose = require('mongoose');
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
+
+async function withTransaction(work) {
+  const session = await mongoose.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      result = await work(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
 
 function createMasterService({
   Model,
@@ -19,6 +33,10 @@ function createMasterService({
   prepareCreate,
   prepareUpdate,
   assertDelete,
+  afterCreate,
+  afterUpdate,
+  beforeDelete,
+  useTransaction = false,
   listMeta,
   listSummary,
   mapItem,
@@ -43,7 +61,7 @@ function createMasterService({
     }
   }
 
-  async function assertUnique(value, excludeId) {
+  async function assertUnique(value, excludeId, session) {
     if (!uniqueField || value === undefined || value === null) {
       return;
     }
@@ -51,50 +69,72 @@ function createMasterService({
     if (excludeId) {
       filter._id = { $ne: excludeId };
     }
-    const exists = await Model.findOne(filter).select('_id');
+    let query = Model.findOne(filter).select('_id');
+    if (session) query = query.session(session);
+    const exists = await query;
     if (exists) {
       throw new ApiError(409, `${uniqueField} already exists`);
     }
   }
 
-  async function assignCode(payload) {
+  async function assignCode(payload, session) {
     if (!codePrefix || !uniqueField) return payload;
     const current = String(payload[uniqueField] || '').trim();
     if (current) {
       payload[uniqueField] = current;
       return payload;
     }
-    payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix);
+    payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix, 3, session);
     return payload;
   }
 
+  async function createDocument(payload, session) {
+    if (session) {
+      const [doc] = await Model.create([payload], { session });
+      return doc;
+    }
+    return Model.create(payload);
+  }
+
   async function create(body, req) {
-    let payload = prepareCreate ? await prepareCreate({ ...body }, req) : { ...body };
-    payload = await assignCode(payload);
-    if (uniqueField) {
-      await assertUnique(payload[uniqueField]);
-    }
-    let doc;
-    try {
-      doc = await Model.create(payload);
-    } catch (error) {
-      if (error?.code !== 11000 || !codePrefix) {
-        throw error;
+    const run = async (session) => {
+      let payload = prepareCreate ? await prepareCreate({ ...body }, req, session) : { ...body };
+      payload = await assignCode(payload, session);
+      if (uniqueField) {
+        await assertUnique(payload[uniqueField], null, session);
       }
-      payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix);
-      await assertUnique(payload[uniqueField]);
-      doc = await Model.create(payload);
-    }
-    invalidate(doc._id);
-    await writeAudit({
-      req,
-      actionName: 'create',
-      moduleName,
-      entityName,
-      entityId: doc._id,
-      newValues: payload,
-    });
-    return toResponse(await loadById(doc._id));
+
+      let doc;
+      try {
+        doc = await createDocument(payload, session);
+      } catch (error) {
+        if (error?.code !== 11000 || !codePrefix) {
+          throw error;
+        }
+        payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix, 3, session);
+        await assertUnique(payload[uniqueField], null, session);
+        doc = await createDocument(payload, session);
+      }
+
+      if (afterCreate) {
+        await afterCreate(doc, payload, req, session);
+      }
+
+      await writeAudit({
+        req,
+        session,
+        actionName: 'create',
+        moduleName,
+        entityName,
+        entityId: doc._id,
+        newValues: payload,
+      });
+      return doc._id;
+    };
+
+    const id = useTransaction ? await withTransaction(run) : await run(null);
+    invalidate(id);
+    return toResponse(await loadById(id));
   }
 
   function toResponse(doc) {
@@ -167,56 +207,87 @@ function createMasterService({
   }
 
   async function update(id, body, req) {
-    const doc = await Model.findById(id);
-    if (!doc) {
-      throw new ApiError(404, `${entityName} not found`);
-    }
+    const run = async (session) => {
+      let findQuery = Model.findById(id);
+      if (session) findQuery = findQuery.session(session);
+      const doc = await findQuery;
+      if (!doc) {
+        throw new ApiError(404, `${entityName} not found`);
+      }
 
-    const payload = prepareUpdate ? await prepareUpdate({ ...body }, doc, req) : { ...body };
-    if (uniqueField && payload[uniqueField] !== undefined) {
-      await assertUnique(payload[uniqueField], id);
-    }
+      const previous = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
+      const payload = prepareUpdate
+        ? await prepareUpdate({ ...body }, doc, req, session)
+        : { ...body };
+      if (uniqueField && payload[uniqueField] !== undefined) {
+        await assertUnique(payload[uniqueField], id, session);
+      }
 
-    const oldValues = uniqueField
-      ? { [uniqueField]: doc[uniqueField] }
-      : { _id: doc._id };
+      const oldValues = uniqueField
+        ? { [uniqueField]: doc[uniqueField] }
+        : { _id: doc._id };
 
-    Object.assign(doc, payload);
-    await doc.save();
-    invalidate(id);
-    await writeAudit({
-      req,
-      actionName: 'update',
-      moduleName,
-      entityName,
-      entityId: doc._id,
-      oldValues,
-      newValues: payload,
-    });
-    return toResponse(await loadById(id));
+      Object.assign(doc, payload);
+      await doc.save(session ? { session } : undefined);
+
+      if (afterUpdate) {
+        await afterUpdate(doc, payload, previous, req, session);
+      }
+
+      await writeAudit({
+        req,
+        session,
+        actionName: 'update',
+        moduleName,
+        entityName,
+        entityId: doc._id,
+        oldValues,
+        newValues: payload,
+      });
+      return doc._id;
+    };
+
+    const docId = useTransaction ? await withTransaction(run) : await run(null);
+    invalidate(docId);
+    return toResponse(await loadById(docId));
   }
 
   async function remove(id, req) {
     if (!allowDelete) {
       throw new ApiError(405, `${entityName} cannot be deleted`);
     }
-    const doc = await Model.findById(id);
-    if (!doc) {
-      throw new ApiError(404, `${entityName} not found`);
+
+    const run = async (session) => {
+      let findQuery = Model.findById(id);
+      if (session) findQuery = findQuery.session(session);
+      const doc = await findQuery;
+      if (!doc) {
+        throw new ApiError(404, `${entityName} not found`);
+      }
+      if (assertDelete) {
+        await assertDelete(doc, session);
+      }
+      if (beforeDelete) {
+        await beforeDelete(doc, req, session);
+      }
+      await doc.deleteOne(session ? { session } : undefined);
+      await writeAudit({
+        req,
+        session,
+        actionName: 'delete',
+        moduleName,
+        entityName,
+        entityId: id,
+        oldValues: uniqueField ? { [uniqueField]: doc[uniqueField] } : { _id: id },
+      });
+    };
+
+    if (useTransaction) {
+      await withTransaction(run);
+    } else {
+      await run(null);
     }
-    if (assertDelete) {
-      await assertDelete(doc);
-    }
-    await doc.deleteOne();
     invalidate(id);
-    await writeAudit({
-      req,
-      actionName: 'delete',
-      moduleName,
-      entityName,
-      entityId: id,
-      oldValues: uniqueField ? { [uniqueField]: doc[uniqueField] } : { _id: id },
-    });
   }
 
   return {
