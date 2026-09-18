@@ -12,10 +12,13 @@ const {
   MAINTENANCE_TYPES,
   ASSET_STATUSES,
   DEPRECIATION_METHODS,
+  PAYMENT_METHODS,
 } = require('../constants/masters');
 
 const optionalDate = z.coerce.date().nullish();
 const optionalCode = code.optional();
+const optionalAccountId = objectId.nullish();
+const optionalPaymentMethod = z.enum(PAYMENT_METHODS).optional();
 
 function createUpdateSchema(bodyShape) {
   return z.object({
@@ -36,6 +39,8 @@ const maintenanceRecordBody = {
   problemDescription: z.string().trim().max(500).optional(),
   workPerformed: z.string().trim().max(1000).optional(),
   maintenanceCostAmount: nonNegative.optional(),
+  paymentMethod: optionalPaymentMethod,
+  accountId: optionalAccountId,
   nextMaintenanceDate: optionalDate,
   performedByEmployeeId: objectId,
 };
@@ -48,6 +53,8 @@ const maintenanceRecordUpdateBody = {
   problemDescription: z.string().trim().max(500).optional(),
   workPerformed: z.string().trim().max(1000).optional(),
   maintenanceCostAmount: nonNegative.optional(),
+  paymentMethod: optionalPaymentMethod,
+  accountId: optionalAccountId,
   nextMaintenanceDate: optionalDate,
   performedByEmployeeId: objectId.optional(),
 };
@@ -61,6 +68,8 @@ const assetBody = {
   serialNumber: z.string().trim().max(80).nullish(),
   purchaseDate: optionalDate,
   purchaseCostAmount: nonNegative.optional(),
+  paymentMethod: optionalPaymentMethod,
+  accountId: optionalAccountId,
   locationName: z.string().trim().max(160).optional(),
   assignedEmployeeId: objectId.nullish(),
   depreciationMethod: z.enum(DEPRECIATION_METHODS).optional(),

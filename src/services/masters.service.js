@@ -42,6 +42,7 @@ const {
   MAINTENANCE_TYPES,
   ASSET_STATUSES,
   DEPRECIATION_METHODS,
+  PAYMENT_METHOD_OPTIONS,
 } = require('../constants/masters');
 
 async function assertActiveCylinderType(cylinderTypeId) {
@@ -1002,6 +1003,18 @@ async function assertAssetForMaintenance(assetId) {
   return asset;
 }
 
+async function assertFundingAccount(accountId) {
+  if (!accountId) return null;
+  const account = await Account.findById(accountId);
+  if (!account) {
+    throw new ApiError(400, 'Account not found');
+  }
+  if (!account.isActive) {
+    throw new ApiError(400, 'Account is inactive');
+  }
+  return account;
+}
+
 function assertBookValue(payload, existing = {}) {
   const purchaseCostAmount = payload.purchaseCostAmount ?? existing.purchaseCostAmount ?? 0;
   const currentBookValueAmount = payload.currentBookValueAmount ?? existing.currentBookValueAmount ?? purchaseCostAmount;
@@ -1027,6 +1040,7 @@ const maintenanceRecord = createMasterService({
   cachePrefix: 'maintenance-records:',
   populate: [
     { path: 'assetId', select: 'assetCode assetName assetCategory assetStatus locationName serialNumber' },
+    { path: 'accountId', select: 'accountCode accountName accountType currentBalanceAmount' },
     { path: 'performedByEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
     { path: 'approvedByUserId', select: 'fullName emailAddress' },
   ],
@@ -1047,11 +1061,15 @@ const maintenanceRecord = createMasterService({
   },
   listMeta: async () => ({
     maintenanceTypes: MAINTENANCE_TYPES,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
   }),
   prepareCreate: async (body, req) => {
     const asset = await assertAssetForMaintenance(body.assetId);
     await assertWorkEmployee(body.performedByEmployeeId);
+    await assertFundingAccount(body.accountId);
     if (!body.maintenanceDate) body.maintenanceDate = new Date();
+    if (!body.paymentMethod) body.paymentMethod = 'cash';
+    if (body.accountId === undefined) body.accountId = null;
     assertMaintenanceDates(body);
     body.approvedByUserId = req.user._id;
     if (['corrective', 'emergency'].includes(body.maintenanceType) && asset.assetStatus === 'in-use') {
@@ -1068,6 +1086,9 @@ const maintenanceRecord = createMasterService({
     if (body.performedByEmployeeId) {
       await assertWorkEmployee(body.performedByEmployeeId);
     }
+    if (body.accountId !== undefined) {
+      await assertFundingAccount(body.accountId);
+    }
     assertMaintenanceDates(body, doc);
     return body;
   },
@@ -1080,7 +1101,10 @@ const asset = createMasterService({
   uniqueField: 'assetCode',
   codePrefix: 'AST',
   cachePrefix: 'assets:',
-  populate: [{ path: 'assignedEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' }],
+  populate: [
+    { path: 'assignedEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
+    { path: 'accountId', select: 'accountCode accountName accountType currentBalanceAmount' },
+  ],
   searchFields: ['assetCode', 'assetName', 'serialNumber', 'locationName', 'manufacturerName'],
   hasIsActive: false,
   extraFilters: (query) => {
@@ -1094,10 +1118,14 @@ const asset = createMasterService({
     assetCategories: ASSET_CATEGORIES,
     assetStatuses: ASSET_STATUSES,
     depreciationMethods: DEPRECIATION_METHODS,
+    paymentMethods: PAYMENT_METHOD_OPTIONS,
   }),
   prepareCreate: async (body) => {
     await assertWorkEmployee(body.assignedEmployeeId);
+    await assertFundingAccount(body.accountId);
     if (!body.serialNumber) body.serialNumber = null;
+    if (!body.paymentMethod) body.paymentMethod = 'cash';
+    if (body.accountId === undefined) body.accountId = null;
     if (body.currentBookValueAmount === undefined) {
       body.currentBookValueAmount = body.purchaseCostAmount || 0;
     }
@@ -1107,6 +1135,9 @@ const asset = createMasterService({
   prepareUpdate: async (body, doc) => {
     if (body.assignedEmployeeId !== undefined) {
       await assertWorkEmployee(body.assignedEmployeeId);
+    }
+    if (body.accountId !== undefined) {
+      await assertFundingAccount(body.accountId);
     }
     if (body.serialNumber === '') body.serialNumber = null;
     assertBookValue(body, doc);

@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { MAINTENANCE_TYPES } = require('../constants/masters');
+const { MAINTENANCE_TYPES, PAYMENT_METHODS } = require('../constants/masters');
 
 const maintenanceRecordSchema = new mongoose.Schema(
   {
@@ -26,6 +26,16 @@ const maintenanceRecordSchema = new mongoose.Schema(
     problemDescription: { type: String, trim: true, default: '' },
     workPerformed: { type: String, trim: true, default: '' },
     maintenanceCostAmount: { type: Number, min: 0, default: 0 },
+    paymentMethod: {
+      type: String,
+      enum: PAYMENT_METHODS,
+      default: 'cash',
+    },
+    accountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      default: null,
+    },
     nextMaintenanceDate: { type: Date, default: null },
     performedByEmployeeId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -43,5 +53,6 @@ const maintenanceRecordSchema = new mongoose.Schema(
 
 maintenanceRecordSchema.index({ assetId: 1, maintenanceDate: -1 });
 maintenanceRecordSchema.index({ performedByEmployeeId: 1, maintenanceDate: -1 });
+maintenanceRecordSchema.index({ accountId: 1 });
 
 module.exports = mongoose.model('MaintenanceRecord', maintenanceRecordSchema);

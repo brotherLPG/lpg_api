@@ -1,5 +1,10 @@
 const mongoose = require('mongoose');
-const { ASSET_CATEGORIES, ASSET_STATUSES, DEPRECIATION_METHODS } = require('../constants/masters');
+const {
+  ASSET_CATEGORIES,
+  ASSET_STATUSES,
+  DEPRECIATION_METHODS,
+  PAYMENT_METHODS,
+} = require('../constants/masters');
 
 const assetSchema = new mongoose.Schema(
   {
@@ -24,6 +29,16 @@ const assetSchema = new mongoose.Schema(
     serialNumber: { type: String, trim: true, default: null },
     purchaseDate: { type: Date, default: null },
     purchaseCostAmount: { type: Number, min: 0, default: 0 },
+    paymentMethod: {
+      type: String,
+      enum: PAYMENT_METHODS,
+      default: 'cash',
+    },
+    accountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      default: null,
+    },
     locationName: { type: String, trim: true, default: '' },
     assignedEmployeeId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -47,6 +62,7 @@ const assetSchema = new mongoose.Schema(
 
 assetSchema.index({ assetCategory: 1, assetStatus: 1 });
 assetSchema.index({ assignedEmployeeId: 1 });
+assetSchema.index({ accountId: 1 });
 assetSchema.index({ serialNumber: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Asset', assetSchema);
