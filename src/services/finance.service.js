@@ -1883,10 +1883,7 @@ async function getExpenseFormOptions() {
   const [nextNumber, categories, accounts] = await Promise.all([
     nextExpenseNumber(),
     ExpenseCategory.find({ isActive: true }).select('categoryCode categoryName').sort({ categoryName: 1 }).lean(),
-    Account.find({ isActive: true, accountType: { $in: ['cash', 'bank'] } })
-      .select('accountCode accountName accountType isPrimary currentBalanceAmount')
-      .sort({ isPrimary: -1, accountName: 1 })
-      .lean(),
+    loadActiveAccounts(),
   ]);
 
   return {
@@ -1899,14 +1896,7 @@ async function getExpenseFormOptions() {
       categoryName: category.categoryName,
       label: category.categoryName,
     })),
-    accounts: accounts.map((account) => ({
-      _id: account._id,
-      accountCode: account.accountCode,
-      accountName: account.accountName,
-      accountType: account.accountType,
-      isPrimary: Boolean(account.isPrimary),
-      label: `${account.accountCode} – ${account.accountName}`,
-    })),
+    accounts: accounts.map(mapAccountOption),
   };
 }
 
