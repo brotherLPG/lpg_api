@@ -1738,6 +1738,15 @@ function resolveExpenseStatus(body, fallback = 'paid') {
   return fallback;
 }
 
+function pickExpenseAccountId(body, fallback) {
+  const raw = body?.paidFromAccountId || body?.accountId || body?.paymentAccountId;
+  if (raw === undefined || raw === null || raw === '') {
+    return fallback === undefined ? null : fallback;
+  }
+  if (typeof raw === 'object' && raw._id) return raw._id;
+  return raw;
+}
+
 function expenseStatusLabel(value) {
   return EXPENSE_STATUSES.find((item) => item.value === value)?.label || titleCaseExpense(value);
 }
@@ -1839,7 +1848,9 @@ async function listExpenses(query) {
   const { page, limit, skip } = parsePagination(query);
   const filter = applyDateRange({}, 'expenseDate', query);
   if (query.expenseCategoryId) filter.expenseCategoryId = query.expenseCategoryId;
-  if (query.paidFromAccountId) filter.paidFromAccountId = query.paidFromAccountId;
+  if (query.paidFromAccountId || query.accountId) {
+    filter.paidFromAccountId = query.paidFromAccountId || query.accountId;
+  }
   const expenseStatus = query.expenseStatus || query.status;
   if (expenseStatus) filter.expenseStatus = expenseStatus;
 
@@ -2555,14 +2566,20 @@ async function removePayment(id, req) {
 async function createExpense(body, req) {
   const result = await withTransaction(async (session) => {
     await assertCategory(body.expenseCategoryId, session);
-    const expenseStatus = resolveExpenseStatus(body, 'paid');
-    const paidFromAccountId = body.paidFromAccountId || null;
+    const paidFromAccountId = pickExpenseAccountId(body);
+    const expenseAmount = roundMoney(body.expenseAmount);
+    let expenseStatus = resolveExpenseStatus(body, 'paid');
+
+    // Amount + account means a paid outflow unless explicitly marked pending.
+    if (paidFromAccountId && expenseAmount > 0 && body.expenseStatus !== 'pending' && body.isApproved !== false) {
+      expenseStatus = 'paid';
+    }
 
     if (expenseStatus === 'paid') {
       if (!paidFromAccountId) {
-        throw new ApiError(400, 'paidFromAccountId is required for a paid expense');
+        throw new ApiError(400, 'accountId (or paidFromAccountId) is required for a paid expense');
       }
-      await changeAccount(paidFromAccountId, -body.expenseAmount, session);
+      await changeAccount(paidFromAccountId, -expenseAmount, session);
     } else if (paidFromAccountId) {
       await assertAccount(paidFromAccountId, session);
     }
@@ -2577,7 +2594,7 @@ async function createExpense(body, req) {
           expenseNumber,
           expenseCategoryId: body.expenseCategoryId,
           paidFromAccountId,
-          expenseAmount: body.expenseAmount,
+          expenseAmount,
           expenseDescription: body.expenseDescription,
           expenseDate: body.expenseDate,
           vendorPayeeName: body.vendorPayeeName || '',
@@ -2599,7 +2616,7 @@ async function createExpense(body, req) {
       moduleName: 'expenses',
       entityName: 'Expense',
       entityId: doc._id,
-      newValues: { expenseNumber, expenseAmount: body.expenseAmount, expenseStatus },
+      newValues: { expenseNumber, expenseAmount, expenseStatus, paidFromAccountId },
     });
     return doc._id;
   });
@@ -2619,19 +2636,36 @@ async function updateExpense(id, body, req) {
     }
 
     const previousStatus = expense.expenseStatus || 'paid';
-    const nextStatus = resolveExpenseStatus(body, previousStatus);
     const previousAccountId = expense.paidFromAccountId;
-    const previousAmount = expense.expenseAmount;
-    const nextAccountId = body.paidFromAccountId !== undefined ? body.paidFromAccountId : expense.paidFromAccountId;
-    const nextAmount = body.expenseAmount ?? expense.expenseAmount;
+    const previousAmount = roundMoney(expense.expenseAmount);
+    const accountProvided = body.paidFromAccountId !== undefined
+      || body.accountId !== undefined
+      || body.paymentAccountId !== undefined;
+    const nextAccountId = accountProvided
+      ? pickExpenseAccountId(body)
+      : expense.paidFromAccountId;
+    const nextAmount = body.expenseAmount !== undefined
+      ? roundMoney(body.expenseAmount)
+      : previousAmount;
 
-    if (nextStatus === 'paid' && !nextAccountId) {
-      throw new ApiError(400, 'paidFromAccountId is required for a paid expense');
+    let resolvedStatus = resolveExpenseStatus(body, previousStatus);
+    if (
+      nextAccountId
+      && nextAmount > 0
+      && body.expenseStatus !== 'pending'
+      && body.isApproved !== false
+      && (accountProvided || body.expenseStatus === 'paid' || body.isApproved === true)
+    ) {
+      resolvedStatus = 'paid';
+    }
+
+    if (resolvedStatus === 'paid' && !nextAccountId) {
+      throw new ApiError(400, 'accountId (or paidFromAccountId) is required for a paid expense');
     }
     if (nextAccountId) await assertAccount(nextAccountId, session);
 
-    const wasPosted = previousStatus === 'paid' && previousAccountId;
-    const willPost = nextStatus === 'paid' && nextAccountId;
+    const wasPosted = previousStatus === 'paid' && previousAccountId && previousAmount > 0;
+    const willPost = resolvedStatus === 'paid' && nextAccountId && nextAmount > 0;
     const postingChanged = wasPosted !== willPost
       || (willPost && (String(previousAccountId) !== String(nextAccountId) || previousAmount !== nextAmount));
 
@@ -2646,8 +2680,8 @@ async function updateExpense(id, body, req) {
 
     expense.paidFromAccountId = nextAccountId || null;
     expense.expenseAmount = nextAmount;
-    expense.expenseStatus = nextStatus;
-    if (nextStatus === 'paid') {
+    expense.expenseStatus = resolvedStatus;
+    if (resolvedStatus === 'paid') {
       expense.approvedByUserId = expense.approvedByUserId || req.user._id;
       if (!expense.paymentDate) expense.paymentDate = body.paymentDate || body.expenseDate || expense.expenseDate;
     } else {

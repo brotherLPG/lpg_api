@@ -276,7 +276,9 @@ const expense = {
     body: z.object({
       expenseNumber: optionalCode,
       expenseCategoryId: objectId,
-      paidFromAccountId: objectId.optional(),
+      paidFromAccountId: optionalAccountId,
+      accountId: optionalAccountId,
+      paymentAccountId: optionalAccountId,
       expenseAmount: positiveAmount,
       expenseDescription: z.string().trim().min(2).max(1000),
       expenseDate: z.coerce.date(),
@@ -294,7 +296,9 @@ const expense = {
     body: atLeastOneField(
       z.object({
         expenseCategoryId: objectId.optional(),
-        paidFromAccountId: objectId.optional(),
+        paidFromAccountId: optionalAccountId,
+        accountId: optionalAccountId,
+        paymentAccountId: optionalAccountId,
         expenseAmount: positiveAmount.optional(),
         expenseDescription: z.string().trim().min(2).max(1000).optional(),
         expenseDate: optionalDate,
@@ -311,6 +315,7 @@ const expense = {
   list: listMasterQuery({
     expenseCategoryId: objectId.optional(),
     paidFromAccountId: objectId.optional(),
+    accountId: objectId.optional(),
     expenseStatus: z.enum(EXPENSE_STATUS_VALUES).optional(),
     status: z.enum(EXPENSE_STATUS_VALUES).optional(),
     startDate: z.coerce.date().optional(),
