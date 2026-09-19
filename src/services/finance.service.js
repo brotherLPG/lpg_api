@@ -938,14 +938,17 @@ async function getSaleFormOptions(query = {}) {
     loadActiveAccounts(),
   ]);
 
-  let customerCreditAmount = 0;
-  let refundDueInvoices = [];
-  if (query.customerId) {
-    [customerCreditAmount, refundDueInvoices] = await Promise.all([
-      customerCreditAvailable(query.customerId),
-      refundDueSalesForCustomer(query.customerId),
-    ]);
-  }
+  const creditTasks = query.customerId
+    ? [
+        customerCreditAvailable(query.customerId),
+        refundDueSalesForCustomer(query.customerId),
+      ]
+    : [Promise.resolve(0), Promise.resolve([])];
+
+  const [customerCreditAmount, refundDueInvoices, outstandingByCustomer] = await Promise.all([
+    ...creditTasks,
+    customerOutstandingByIds(customers.map((customer) => customer._id)),
+  ]);
 
   return {
     nextSaleNumber,
@@ -966,6 +969,7 @@ async function getSaleFormOptions(query = {}) {
       phoneNumber: customer.phoneNumber || '',
       paymentTermDays: customer.paymentTermDays || 0,
       creditLimitAmount: customer.creditLimitAmount || 0,
+      outstanding: outstandingByCustomer.get(String(customer._id)) || 0,
       label: `${customer.customerCode} – ${customer.customerName}`,
     })),
     inventoryItems: inventoryItems.map((item) => ({
@@ -1354,6 +1358,62 @@ async function customerLedgerOutstanding(customerId, session) {
   const [[saleRow], [returnRow], [paymentRow]] = await Promise.all([salesAgg, returnAgg, paymentAgg]);
   return roundMoney(
     (saleRow?.total || 0) - (returnRow?.total || 0) - (paymentRow?.received || 0) + (paymentRow?.refunded || 0)
+  );
+}
+
+async function customerOutstandingByIds(customerIds = []) {
+  if (!customerIds.length) return new Map();
+
+  const ids = customerIds.map(asObjectId);
+  const [saleRows, returnRows, paymentRows] = await Promise.all([
+    Sale.aggregate([
+      { $match: { customerId: { $in: ids }, saleStatus: { $nin: ['cancelled', 'draft'] } } },
+      { $group: { _id: '$customerId', total: { $sum: '$totalAmount' } } },
+    ]),
+    SalesReturn.aggregate([
+      { $match: { customerId: { $in: ids } } },
+      { $group: { _id: '$customerId', total: { $sum: '$totalReturnAmount' } } },
+    ]),
+    Payment.aggregate([
+      {
+        $match: {
+          customerId: { $in: ids },
+          paymentType: { $in: ['receive', 'refund'] },
+          paymentStatus: { $ne: 'pending' },
+        },
+      },
+      {
+        $group: {
+          _id: '$customerId',
+          received: {
+            $sum: { $cond: [{ $eq: ['$paymentType', 'receive'] }, '$paymentAmount', 0] },
+          },
+          refunded: {
+            $sum: { $cond: [{ $eq: ['$paymentType', 'refund'] }, '$paymentAmount', 0] },
+          },
+        },
+      },
+    ]),
+  ]);
+
+  const salesMap = new Map(saleRows.map((row) => [String(row._id), row.total || 0]));
+  const returnsMap = new Map(returnRows.map((row) => [String(row._id), row.total || 0]));
+  const paymentsMap = new Map(paymentRows.map((row) => [String(row._id), row]));
+
+  return new Map(
+    ids.map((id) => {
+      const key = String(id);
+      const payment = paymentsMap.get(key);
+      return [
+        key,
+        roundMoney(
+          (salesMap.get(key) || 0)
+            - (returnsMap.get(key) || 0)
+            - (payment?.received || 0)
+            + (payment?.refunded || 0)
+        ),
+      ];
+    })
   );
 }
 
