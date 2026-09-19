@@ -203,12 +203,17 @@ function toFillingItem(doc) {
   const type = doc.cylinderTypeId && doc.cylinderTypeId.typeName ? doc.cylinderTypeId : null;
   const operator = doc.operatorEmployeeId && doc.operatorEmployeeId.fullName ? doc.operatorEmployeeId : null;
 
+  const residualRecoveredKg = Number(doc.residualRecoveredKg) || 0;
+  const expectedFillKg = roundMoney(doc.cylinderCount * doc.targetFillWeightKg);
+
   return {
     _id: doc._id,
     batchNumber: doc.batchNumber,
     fillingDate: doc.fillingDate,
     cylinderCount: doc.cylinderCount,
     targetFillWeightKg: doc.targetFillWeightKg,
+    expectedFillKg,
+    residualRecoveredKg,
     actualLpgUsedKg: doc.actualLpgUsedKg,
     remarks: doc.remarks || '',
     batchStatus,
@@ -672,6 +677,11 @@ async function listFillings(query) {
               $cond: [{ $ne: ['$batchStatus', 'pending'] }, '$actualLpgUsedKg', 0],
             },
           },
+          totalResidualRecoveredKg: {
+            $sum: {
+              $cond: [{ $ne: ['$batchStatus', 'pending'] }, { $ifNull: ['$residualRecoveredKg', 0] }, 0],
+            },
+          },
           completed: {
             $sum: { $cond: [{ $ne: ['$batchStatus', 'pending'] }, 1, 0] },
           },
@@ -681,13 +691,19 @@ async function listFillings(query) {
     FillingBatch.countDocuments({ batchStatus: 'pending' }),
   ]);
 
-  const stats = summaryAgg[0] || { totalBatches: 0, totalQuantityKg: 0, completed: 0 };
+  const stats = summaryAgg[0] || {
+    totalBatches: 0,
+    totalQuantityKg: 0,
+    totalResidualRecoveredKg: 0,
+    completed: 0,
+  };
 
   return {
     ...paginated(items.map(toFillingItem), total, page, limit),
     summary: {
       totalBatches: stats.totalBatches || 0,
       totalQuantityKg: roundMoney(stats.totalQuantityKg || 0),
+      totalResidualRecoveredKg: roundMoney(stats.totalResidualRecoveredKg || 0),
       completed: stats.completed || 0,
       pending,
     },
@@ -956,8 +972,52 @@ async function reverseFillingStock({ storageTankId, cylinderTypeId, cylinderCoun
 function resolveFillingQty(body, cylinderType, existing) {
   const cylinderCount = body.cylinderCount ?? existing?.cylinderCount;
   const targetFillWeightKg = body.targetFillWeightKg ?? existing?.targetFillWeightKg ?? cylinderType.capacityKg;
-  const actualLpgUsedKg = body.actualLpgUsedKg ?? existing?.actualLpgUsedKg ?? cylinderCount * targetFillWeightKg;
-  return { cylinderCount, targetFillWeightKg, actualLpgUsedKg };
+  const expectedFillKg = roundMoney(cylinderCount * targetFillWeightKg);
+
+  const residualProvided = body.residualRecoveredKg !== undefined;
+  const actualProvided = body.actualLpgUsedKg !== undefined;
+
+  let residualRecoveredKg = residualProvided
+    ? Number(body.residualRecoveredKg)
+    : Number(existing?.residualRecoveredKg || 0);
+
+  let actualLpgUsedKg;
+  if (actualProvided) {
+    actualLpgUsedKg = Number(body.actualLpgUsedKg);
+    if (!residualProvided) {
+      residualRecoveredKg = roundMoney(Math.max(0, expectedFillKg - actualLpgUsedKg));
+    }
+  } else if (residualProvided) {
+    actualLpgUsedKg = roundMoney(expectedFillKg - residualRecoveredKg);
+  } else if (existing?.actualLpgUsedKg != null) {
+    actualLpgUsedKg = Number(existing.actualLpgUsedKg);
+  } else {
+    actualLpgUsedKg = expectedFillKg;
+  }
+
+  residualRecoveredKg = roundMoney(residualRecoveredKg);
+  actualLpgUsedKg = roundMoney(actualLpgUsedKg);
+
+  if (residualRecoveredKg < 0) {
+    throw new ApiError(400, 'residualRecoveredKg cannot be negative');
+  }
+  if (residualRecoveredKg >= expectedFillKg) {
+    throw new ApiError(400, 'residualRecoveredKg must be less than expected fill (cylinderCount × targetFillWeightKg)');
+  }
+  if (actualLpgUsedKg <= 0) {
+    throw new ApiError(400, 'actualLpgUsedKg must be greater than 0');
+  }
+  if (actualProvided && residualProvided) {
+    const sum = roundMoney(actualLpgUsedKg + residualRecoveredKg);
+    if (Math.abs(sum - expectedFillKg) > 0.01) {
+      throw new ApiError(
+        400,
+        `actualLpgUsedKg (${actualLpgUsedKg}) + residualRecoveredKg (${residualRecoveredKg}) must equal expected fill ${expectedFillKg}`
+      );
+    }
+  }
+
+  return { cylinderCount, targetFillWeightKg, expectedFillKg, residualRecoveredKg, actualLpgUsedKg };
 }
 
 async function createFilling(body, req) {
@@ -987,6 +1047,7 @@ async function createFilling(body, req) {
       cylinderTypeId: body.cylinderTypeId,
       cylinderCount: qty.cylinderCount,
       targetFillWeightKg: qty.targetFillWeightKg,
+      residualRecoveredKg: qty.residualRecoveredKg,
       actualLpgUsedKg: qty.actualLpgUsedKg,
       fillingDate: body.fillingDate,
       operatorEmployeeId: body.operatorEmployeeId,
@@ -1017,6 +1078,8 @@ async function createFilling(body, req) {
         tankName: tank.tankName,
         quantityBeforeKg,
         quantityAfterKg,
+        expectedFillKg: qty.expectedFillKg,
+        residualRecoveredKg: qty.residualRecoveredKg,
         lpgUsedKg: qty.actualLpgUsedKg,
         applied: batchStatus === 'completed',
       },
@@ -1061,6 +1124,7 @@ async function updateFilling(id, body, req) {
     const stockChanged =
       qty.cylinderCount !== existing.cylinderCount
       || qty.actualLpgUsedKg !== existing.actualLpgUsedKg
+      || qty.residualRecoveredKg !== (Number(existing.residualRecoveredKg) || 0)
       || String(nextTankId) !== String(existing.storageTankId)
       || String(nextTypeId) !== String(existing.cylinderTypeId);
     const wasCompleted = previousStatus === 'completed';
@@ -1097,6 +1161,7 @@ async function updateFilling(id, body, req) {
 
     const oldValues = {
       cylinderCount: existing.cylinderCount,
+      residualRecoveredKg: existing.residualRecoveredKg || 0,
       actualLpgUsedKg: existing.actualLpgUsedKg,
       storageTankId: existing.storageTankId,
       cylinderTypeId: existing.cylinderTypeId,
@@ -1107,6 +1172,7 @@ async function updateFilling(id, body, req) {
     existing.cylinderTypeId = nextTypeId;
     existing.cylinderCount = qty.cylinderCount;
     existing.targetFillWeightKg = qty.targetFillWeightKg;
+    existing.residualRecoveredKg = qty.residualRecoveredKg;
     existing.actualLpgUsedKg = qty.actualLpgUsedKg;
     existing.operatorEmployeeId = nextEmployeeId;
     existing.batchStatus = nextStatus;

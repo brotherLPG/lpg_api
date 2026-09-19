@@ -28,6 +28,11 @@ const fillingBatchSchema = new mongoose.Schema(
       required: [true, 'targetFillWeightKg is required'],
       min: [0.01, 'targetFillWeightKg must be greater than 0'],
     },
+    residualRecoveredKg: {
+      type: Number,
+      min: [0, 'residualRecoveredKg cannot be negative'],
+      default: 0,
+    },
     actualLpgUsedKg: {
       type: Number,
       required: [true, 'actualLpgUsedKg is required'],
