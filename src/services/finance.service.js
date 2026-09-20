@@ -90,6 +90,14 @@ function eventTimestamp(date, createdAt) {
   return usableTimestamp(date) ?? usableTimestamp(createdAt) ?? 0;
 }
 
+/** Calendar day in UTC so date-only paymentDate sorts with timed receivedAt/invoiceDate. */
+function businessDayTimestamp(date, createdAt) {
+  const time = usableTimestamp(date) ?? usableTimestamp(createdAt);
+  if (time == null) return 0;
+  const day = new Date(time);
+  return Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+}
+
 function newestPaymentFirst(left, right) {
   return (usableTimestamp(right.createdAt) ?? 0) - (usableTimestamp(left.createdAt) ?? 0);
 }
@@ -2824,7 +2832,7 @@ function computePaymentBalanceAfter(sales, returns, payments) {
   sales.forEach((sale) => {
     events.push({
       type: 'sale',
-      at: eventTimestamp(sale.invoiceDate, sale.createdAt),
+      at: businessDayTimestamp(sale.invoiceDate, sale.createdAt),
       createdAt: sale.createdAt,
       amount: sale.totalAmount,
       id: String(sale._id),
@@ -2834,7 +2842,7 @@ function computePaymentBalanceAfter(sales, returns, payments) {
   returns.forEach((item) => {
     events.push({
       type: 'return',
-      at: eventTimestamp(item.returnDate, item.createdAt),
+      at: businessDayTimestamp(item.returnDate, item.createdAt),
       createdAt: item.createdAt,
       amount: item.totalReturnAmount,
     });
@@ -2843,7 +2851,7 @@ function computePaymentBalanceAfter(sales, returns, payments) {
   payments.forEach((item) => {
     events.push({
       type: item.paymentType === 'refund' ? 'refund' : 'receive',
-      at: eventTimestamp(item.paymentDate, item.createdAt),
+      at: businessDayTimestamp(item.paymentDate, item.createdAt),
       createdAt: item.createdAt,
       amount: item.paymentAmount,
       id: String(item._id),
@@ -3056,7 +3064,7 @@ function computeSupplierPaymentBalanceAfter(purchases, payments) {
     if (purchase.receiptStatus === 'pending') return;
     events.push({
       type: 'purchase',
-      at: eventTimestamp(purchase.receivedAt, purchase.createdAt),
+      at: businessDayTimestamp(purchase.receivedAt, purchase.createdAt),
       createdAt: purchase.createdAt,
       amount: purchase.totalPurchaseAmount,
       id: String(purchase._id),
@@ -3066,7 +3074,7 @@ function computeSupplierPaymentBalanceAfter(purchases, payments) {
   payments.forEach((item) => {
     events.push({
       type: 'pay',
-      at: eventTimestamp(item.paymentDate, item.createdAt),
+      at: businessDayTimestamp(item.paymentDate, item.createdAt),
       createdAt: item.createdAt,
       amount: item.paymentAmount,
       id: String(item._id),
