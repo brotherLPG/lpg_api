@@ -2817,6 +2817,13 @@ function ledgerEventRank(type) {
   return 2;
 }
 
+/** Same calendar day: follow createdAt so refunds are not forced before earlier receipts. */
+function compareLedgerEvents(left, right) {
+  return left.at - right.at
+    || new Date(left.createdAt || 0) - new Date(right.createdAt || 0)
+    || ledgerEventRank(left.type) - ledgerEventRank(right.type);
+}
+
 function withAfterBalance(item, id, balanceAfterById) {
   const afterBalance = balanceAfterById[String(id)] ?? null;
   return {
@@ -2859,11 +2866,7 @@ function computePaymentBalanceAfter(sales, returns, payments) {
     });
   });
 
-  events.sort((left, right) => (
-    left.at - right.at
-    || ledgerEventRank(left.type) - ledgerEventRank(right.type)
-    || new Date(left.createdAt || 0) - new Date(right.createdAt || 0)
-  ));
+  events.sort(compareLedgerEvents);
 
   let running = 0;
   const balanceAfterById = {};
@@ -3082,11 +3085,7 @@ function computeSupplierPaymentBalanceAfter(purchases, payments) {
     });
   });
 
-  events.sort((left, right) => (
-    left.at - right.at
-    || ledgerEventRank(left.type) - ledgerEventRank(right.type)
-    || new Date(left.createdAt || 0) - new Date(right.createdAt || 0)
-  ));
+  events.sort(compareLedgerEvents);
 
   let running = 0;
   const balanceAfterById = {};
