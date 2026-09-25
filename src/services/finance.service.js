@@ -27,6 +27,7 @@ const {
   RETURN_REASONS,
   RETURN_ACTION_TYPE,
   PAYMENT_METHOD_OPTIONS,
+  PAYMENT_TYPE_OPTIONS,
   PAYMENT_DIRECTIONS,
   PAYMENT_DIRECTION_OPTIONS,
   PAYMENT_VOUCHER_STATUSES,
@@ -1260,6 +1261,21 @@ function paymentMethodLabel(value) {
   return PAYMENT_METHOD_OPTIONS.find((item) => item.value === value)?.label || value;
 }
 
+function paymentTypeLabel(value) {
+  return PAYMENT_TYPE_OPTIONS.find((item) => item.value === value)?.label || value;
+}
+
+function paymentCashFlowDirection(paymentType) {
+  return paymentType === 'receive' ? 'receive' : 'pay';
+}
+
+function paymentCashFlowDirectionLabel(paymentType) {
+  if (paymentType === 'receive') return 'Customer Receipt (Inward)';
+  if (paymentType === 'refund') return 'Customer Refund (Outward)';
+  if (paymentType === 'pay') return 'Supplier Payment (Outward)';
+  return paymentDirectionLabel(paymentCashFlowDirection(paymentType));
+}
+
 function paymentDirectionLabel(value) {
   return PAYMENT_DIRECTIONS.find((item) => item.value === value)?.label || value;
 }
@@ -1274,20 +1290,24 @@ function toPaymentItem(doc) {
   const account = doc.accountId && typeof doc.accountId === 'object' ? doc.accountId : null;
   const paymentType = doc.paymentType;
   const paymentStatus = doc.paymentStatus || 'recorded';
+  const direction = paymentCashFlowDirection(paymentType);
+  const paymentAmount = roundMoney(doc.paymentAmount);
   const allocations = paymentAllocationsOf(doc).map((line) => {
     const sale = line.saleId && typeof line.saleId === 'object' ? line.saleId : null;
     const receipt = line.lpgReceiptId && typeof line.lpgReceiptId === 'object' ? line.lpgReceiptId : null;
+    const currentInvoiceOutstanding = sale
+      ? roundMoney(sale.outstandingAmount)
+      : receipt
+        ? roundMoney(receipt.outstandingAmount)
+        : null;
     return {
       saleId: sale?._id || line.saleId || null,
       lpgReceiptId: receipt?._id || line.lpgReceiptId || null,
       invoiceNumber: sale?.invoiceNumber || '',
       receiptNumber: receipt?.receiptNumber || '',
       amountApplied: roundMoney(line.amountApplied),
-      outstandingAmount: sale
-        ? roundMoney(sale.outstandingAmount)
-        : receipt
-          ? roundMoney(receipt.outstandingAmount)
-          : null,
+      outstandingAmount: currentInvoiceOutstanding,
+      currentInvoiceOutstanding,
     };
   });
 
@@ -1296,8 +1316,9 @@ function toPaymentItem(doc) {
     paymentNumber: doc.paymentNumber,
     paymentDate: coalesceBusinessDate(doc.paymentDate, doc.createdAt),
     paymentType,
-    direction: paymentType === 'pay' ? 'pay' : 'receive',
-    directionLabel: paymentDirectionLabel(paymentType === 'refund' ? 'receive' : paymentType),
+    paymentTypeLabel: paymentTypeLabel(paymentType),
+    direction,
+    directionLabel: paymentCashFlowDirectionLabel(paymentType),
     customerId: customer?._id || doc.customerId || null,
     supplierId: supplier?._id || doc.supplierId || null,
     partyName: customer?.customerName || supplier?.supplierName || '',
@@ -1305,7 +1326,8 @@ function toPaymentItem(doc) {
     partyType: supplier ? 'supplier' : customer ? 'customer' : null,
     accountId: account?._id || doc.accountId,
     accountName: account ? `${account.accountCode} – ${account.accountName}` : '',
-    paymentAmount: roundMoney(doc.paymentAmount),
+    paymentAmount,
+    signedAmount: direction === 'receive' ? paymentAmount : roundMoney(-paymentAmount),
     paymentMethod: doc.paymentMethod,
     paymentMethodLabel: paymentMethodLabel(doc.paymentMethod),
     paymentStatus,
@@ -1730,6 +1752,7 @@ async function listPayments(query) {
   return {
     ...paginated(items.map(toPaymentItem), total, page, limit),
     meta: {
+      paymentTypes: PAYMENT_TYPE_OPTIONS,
       directions: PAYMENT_DIRECTIONS,
       paymentMethods: PAYMENT_METHOD_OPTIONS,
       statuses: PAYMENT_VOUCHER_STATUSES,
@@ -1771,6 +1794,7 @@ async function getPaymentFormOptions(query = {}) {
 
   return {
     nextPaymentNumber: nextNumber,
+    paymentTypes: PAYMENT_TYPE_OPTIONS,
     directions: PAYMENT_DIRECTION_OPTIONS,
     paymentMethods: PAYMENT_METHOD_OPTIONS,
     statuses: PAYMENT_VOUCHER_STATUSES,

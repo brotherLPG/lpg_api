@@ -105,6 +105,11 @@ const SALE_STATUS_OPTIONS = [
   { value: 'cancelled', label: 'Cancelled' },
 ];
 const PAYMENT_TYPES = ['receive', 'pay', 'refund'];
+const PAYMENT_TYPE_OPTIONS = [
+  { value: 'receive', label: 'Customer Receipt' },
+  { value: 'pay', label: 'Supplier Payment' },
+  { value: 'refund', label: 'Customer Refund' },
+];
 const PAYMENT_METHODS = ['cash', 'bank', 'cheque', 'online'];
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'cash', label: 'Cash' },
@@ -113,8 +118,8 @@ const PAYMENT_METHOD_OPTIONS = [
   { value: 'online', label: 'Online' },
 ];
 const PAYMENT_DIRECTIONS = [
-  { value: 'receive', label: 'Customer Receipt' },
-  { value: 'pay', label: 'Supplier Payment' },
+  { value: 'receive', label: 'Customer Receipt (Inward)' },
+  { value: 'pay', label: 'Supplier Payment (Outward)' },
 ];
 const PAYMENT_DIRECTION_OPTIONS = [
   { value: 'receive', label: 'Customer Receipt (Inward)' },
@@ -222,6 +227,7 @@ module.exports = {
   PAYMENT_STATUSES,
   PAYMENT_STATUS_OPTIONS,
   PAYMENT_TYPES,
+  PAYMENT_TYPE_OPTIONS,
   PAYMENT_METHODS,
   PAYMENT_METHOD_OPTIONS,
   PAYMENT_DIRECTIONS,
