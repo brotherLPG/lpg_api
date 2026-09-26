@@ -821,11 +821,15 @@ async function getReturnById(id) {
   };
 }
 
-async function getPaymentById(id) {
+async function loadPayment(id) {
   const doc = await populateQuery(Payment.findById(id), PAYMENT_POPULATE);
   if (!doc) throw new ApiError(404, 'Payment not found');
   const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
-  const mapped = toPaymentItem(plain);
+  return toPaymentItem(plain);
+}
+
+async function getPaymentById(id) {
+  const mapped = await loadPayment(id);
   return {
     ...mapped,
     form: await getPaymentFormOptions({
@@ -1569,6 +1573,14 @@ function buildAllocationRemarks(allocations, invoices, paymentAmount) {
   }).join('; ');
 }
 
+async function findDocsByIds(Model, ids, session) {
+  if (!ids.length) return new Map();
+  let query = Model.find({ _id: { $in: ids } });
+  if (session) query = query.session(session);
+  const docs = await query;
+  return new Map(docs.map((doc) => [String(doc._id), doc]));
+}
+
 async function loadAndValidateAllocations(allocations, { customerId, supplierId, paymentAmount, paymentType }, session) {
   if (!allocations.length) return [];
   if (paymentType === 'pay') {
@@ -1577,15 +1589,18 @@ async function loadAndValidateAllocations(allocations, { customerId, supplierId,
       throw new ApiError(400, 'Allocated amount cannot exceed payment amount');
     }
 
-    const loaded = [];
+    const receiptIds = [];
     for (const alloc of allocations) {
-      const receiptId = alloc.lpgReceiptId;
-      if (!receiptId) {
+      if (!alloc.lpgReceiptId) {
         throw new ApiError(400, 'lpgReceiptId is required for supplier payment allocations');
       }
-      let receiptQuery = LPGReceipt.findById(receiptId);
-      if (session) receiptQuery = receiptQuery.session(session);
-      const receipt = await receiptQuery;
+      receiptIds.push(alloc.lpgReceiptId);
+    }
+    const receiptsById = await findDocsByIds(LPGReceipt, receiptIds, session);
+
+    const loaded = [];
+    for (const alloc of allocations) {
+      const receipt = receiptsById.get(String(alloc.lpgReceiptId));
       if (!receipt) throw new ApiError(400, 'Allocated LPG receipt not found');
       if (receipt.receiptStatus === 'pending') {
         throw new ApiError(400, 'Cannot allocate to a pending LPG receipt');
@@ -1624,14 +1639,18 @@ async function loadAndValidateAllocations(allocations, { customerId, supplierId,
     throw new ApiError(400, 'Allocated amount cannot exceed payment amount');
   }
 
-  const loaded = [];
+  const saleIds = [];
   for (const alloc of allocations) {
     if (!alloc.saleId) {
       throw new ApiError(400, 'saleId is required for customer payment allocations');
     }
-    let saleQuery = Sale.findById(alloc.saleId);
-    if (session) saleQuery = saleQuery.session(session);
-    const sale = await saleQuery;
+    saleIds.push(alloc.saleId);
+  }
+  const salesById = await findDocsByIds(Sale, saleIds, session);
+
+  const loaded = [];
+  for (const alloc of allocations) {
+    const sale = salesById.get(String(alloc.saleId));
     if (!sale) throw new ApiError(400, 'Allocated sale invoice not found');
     if (sale.saleStatus === 'cancelled' || sale.saleStatus === 'draft') {
       throw new ApiError(400, 'Cannot allocate to a cancelled or draft sale');
@@ -1656,9 +1675,10 @@ async function loadAndValidateAllocations(allocations, { customerId, supplierId,
   return loaded;
 }
 
-async function postPaymentEffects({ paymentType, accountId, paymentAmount, allocations }, session) {
+async function postPaymentEffects({ paymentType, accountId, paymentAmount, allocations, accountVerified = false }, session) {
+  const accountOptions = accountVerified ? { verified: true } : {};
   if (paymentType === 'receive') {
-    await changeAccount(accountId, paymentAmount, session);
+    await changeAccount(accountId, paymentAmount, session, accountOptions);
     for (const alloc of allocations) {
       await applySalePayment(alloc.sale, alloc.amountApplied, session);
     }
@@ -1666,7 +1686,7 @@ async function postPaymentEffects({ paymentType, accountId, paymentAmount, alloc
   }
   if (paymentType === 'refund') {
     if (!allocations.length) throw new ApiError(400, 'saleId is required for refund');
-    await changeAccount(accountId, -paymentAmount, session);
+    await changeAccount(accountId, -paymentAmount, session, accountOptions);
     for (const alloc of allocations) {
       if (alloc.amountApplied > alloc.sale.paidAmount) {
         throw new ApiError(400, 'Refund exceeds paid amount');
@@ -1676,7 +1696,7 @@ async function postPaymentEffects({ paymentType, accountId, paymentAmount, alloc
     return;
   }
   if (paymentType === 'pay') {
-    await changeAccount(accountId, -paymentAmount, session);
+    await changeAccount(accountId, -paymentAmount, session, accountOptions);
     for (const alloc of allocations) {
       if (alloc.receipt) await applyReceiptPayment(alloc.receipt, alloc.amountApplied, session);
     }
@@ -2493,6 +2513,7 @@ async function createPayment(body, req) {
         accountId: body.accountId,
         paymentAmount: body.paymentAmount,
         allocations: loadedAllocations,
+        accountVerified: true,
       }, session);
     }
 
@@ -2548,7 +2569,7 @@ async function createPayment(body, req) {
   });
 
   invalidateFinance();
-  return getPaymentById(result);
+  return loadPayment(result);
 }
 
 async function updatePayment(id, body, req) {
@@ -2592,6 +2613,7 @@ async function updatePayment(id, body, req) {
       await assertSupplier(body.supplierId, session);
       payment.supplierId = body.supplierId;
     }
+    let preparedAllocations = null;
     if (body.allocations !== undefined) {
       const allocations = normalizeAllocations({
         ...body,
@@ -2599,7 +2621,7 @@ async function updatePayment(id, body, req) {
         saleId: body.saleId,
         lpgReceiptId: body.lpgReceiptId,
       });
-      await loadAndValidateAllocations(
+      preparedAllocations = await loadAndValidateAllocations(
         allocations,
         {
           customerId: payment.customerId,
@@ -2616,27 +2638,31 @@ async function updatePayment(id, body, req) {
     if (body.remarks !== undefined) payment.remarks = body.remarks;
 
     if (postingNow) {
-      const allocations = normalizeAllocations({
-        allocations: payment.allocations,
-        saleId: payment.saleId,
-        lpgReceiptId: payment.lpgReceiptId,
-        paymentAmount: payment.paymentAmount,
-      });
-      const loadedAllocations = await loadAndValidateAllocations(
-        allocations,
-        {
-          customerId: payment.customerId,
-          supplierId: payment.supplierId,
+      let loadedAllocations = preparedAllocations;
+      if (!loadedAllocations) {
+        const allocations = normalizeAllocations({
+          allocations: payment.allocations,
+          saleId: payment.saleId,
+          lpgReceiptId: payment.lpgReceiptId,
           paymentAmount: payment.paymentAmount,
-          paymentType: payment.paymentType,
-        },
-        session
-      );
+        });
+        loadedAllocations = await loadAndValidateAllocations(
+          allocations,
+          {
+            customerId: payment.customerId,
+            supplierId: payment.supplierId,
+            paymentAmount: payment.paymentAmount,
+            paymentType: payment.paymentType,
+          },
+          session
+        );
+      }
       await postPaymentEffects({
         paymentType: payment.paymentType,
         accountId: payment.accountId,
         paymentAmount: payment.paymentAmount,
         allocations: loadedAllocations,
+        accountVerified: body.accountId !== undefined,
       }, session);
       payment.paymentStatus = 'recorded';
     }
@@ -2655,7 +2681,7 @@ async function updatePayment(id, body, req) {
   });
 
   invalidateFinance();
-  return getPaymentById(result);
+  return loadPayment(result);
 }
 
 async function removePayment(id, req) {
