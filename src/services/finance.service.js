@@ -16,7 +16,7 @@ const {
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
-const { nextSequentialCode, peekSequentialCode } = require('../utils/nextCode');
+const { nextSequentialCode, peekSequentialCode, useSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 const {
   PAYMENT_TERMS,
@@ -169,10 +169,8 @@ async function withTransaction(work) {
   }
 }
 
-async function assignNumber(Model, field, prefix, provided, session) {
-  const current = String(provided || '').trim();
-  if (current) return current;
-  return nextSequentialCode(Model, field, prefix, 3, session);
+async function assignNumber(Model, field, prefix, provided, session, pad = 3) {
+  return useSequentialCode(Model, field, prefix, provided, pad, session);
 }
 
 function deriveBalances(totalAmount, paidAmount, returnedAmount) {
@@ -2085,8 +2083,9 @@ async function createSale(body, req) {
     }
 
     const saleNumber = await assignNumber(Sale, 'saleNumber', 'SAL', body.saleNumber, session);
+    const invoiceYear = new Date().getFullYear();
     const invoiceNumber = body.invoiceNumber
-      ? await assignNumber(Sale, 'invoiceNumber', 'INV', body.invoiceNumber, session)
+      ? await assignNumber(Sale, 'invoiceNumber', `INV-${invoiceYear}`, body.invoiceNumber, session, 4)
       : await nextInvoiceNumber(session);
 
     const initialBalances = deriveBalances(totals.totalAmount, amountPaid, 0);
@@ -2391,8 +2390,9 @@ async function createReturn(body, req) {
     }
 
     const totalReturnAmount = roundMoney(returnItems.reduce((sum, line) => sum + line.lineTotalAmount, 0));
+    const returnYear = new Date().getFullYear();
     const returnNumber = body.returnNumber
-      ? await assignNumber(SalesReturn, 'returnNumber', 'RET', body.returnNumber, session)
+      ? await assignNumber(SalesReturn, 'returnNumber', `RET-${returnYear}`, body.returnNumber, session, 4)
       : await nextReturnNumber(session);
     const [doc] = await SalesReturn.create(
       [
@@ -2528,8 +2528,9 @@ async function createPayment(body, req) {
       };
     });
     const remarks = body.remarks || buildAllocationRemarks(allocations, invoices, body.paymentAmount);
+    const paymentYear = new Date().getFullYear();
     const paymentNumber = body.paymentNumber
-      ? await assignNumber(Payment, 'paymentNumber', 'PAY', body.paymentNumber, session)
+      ? await assignNumber(Payment, 'paymentNumber', `PAY-${paymentYear}`, body.paymentNumber, session, 4)
       : await nextPaymentNumber(session);
 
     const [doc] = await Payment.create(
@@ -2727,7 +2728,7 @@ async function createExpense(body, req) {
     }
 
     const expenseNumber = body.expenseNumber
-      ? await assignNumber(Expense, 'expenseNumber', 'EXP', body.expenseNumber, session)
+      ? await assignNumber(Expense, 'expenseNumber', 'EXP', body.expenseNumber, session, 4)
       : await nextExpenseNumber(session);
 
     const [doc] = await Expense.create(

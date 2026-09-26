@@ -12,7 +12,7 @@ const {
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
-const { nextSequentialCode, peekSequentialCode } = require('../utils/nextCode');
+const { peekSequentialCode, useSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 const { receiptFinance } = require('./finance.service');
 const {
@@ -285,10 +285,8 @@ async function withTransaction(work) {
   }
 }
 
-async function assignNumber(Model, field, prefix, provided, session) {
-  const current = String(provided || '').trim();
-  if (current) return current;
-  return nextSequentialCode(Model, field, prefix, 3, session);
+async function assignNumber(Model, field, prefix, provided, session, pad = 3) {
+  return useSequentialCode(Model, field, prefix, provided, pad, session);
 }
 
 async function assertSupplier(supplierId, session) {

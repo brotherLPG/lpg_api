@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
-const { nextSequentialCode } = require('../utils/nextCode');
+const { nextSequentialCode, claimSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 
 async function withTransaction(work) {
@@ -81,6 +81,7 @@ function createMasterService({
     if (!codePrefix || !uniqueField) return payload;
     const current = String(payload[uniqueField] || '').trim();
     if (current) {
+      await claimSequentialCode(Model, uniqueField, current, session);
       payload[uniqueField] = current;
       return payload;
     }

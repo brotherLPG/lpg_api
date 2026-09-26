@@ -60,10 +60,41 @@ async function readCounter(key, session) {
   return applySession(Counter.findById(key), session);
 }
 
+async function raiseCounterTo(key, seq, session) {
+  const write = async (upsert) => {
+    const options = { upsert };
+    if (session) options.session = session;
+    await Counter.updateOne({ _id: key }, { $max: { seq } }, options);
+  };
+  try {
+    await write(true);
+  } catch (error) {
+    if (error?.code !== 11000) throw error;
+    await write(false);
+  }
+}
+
 async function seedCounter(key, max, session) {
-  const options = { upsert: true };
-  if (session) options.session = session;
-  await Counter.updateOne({ _id: key }, { $setOnInsert: { seq: max } }, options);
+  await raiseCounterTo(key, max, session);
+}
+
+async function codeTaken(Model, field, code, session) {
+  const query = Model.exists({ [field]: code });
+  if (session) query.session(session);
+  return Boolean(await query);
+}
+
+function parsedSequence(code) {
+  const match = String(code || '').match(/^(.*)-(\d+)$/);
+  if (!match) return null;
+  return { prefix: match[1], seq: Number(match[2]) };
+}
+
+async function claimSequentialCode(Model, field, code, session) {
+  const parsed = parsedSequence(code);
+  if (!parsed) return;
+  await ensureCountersCollection();
+  await raiseCounterTo(counterKey(Model, field, parsed.prefix), parsed.seq, session);
 }
 
 async function storedSeq(Model, field, prefix, session) {
@@ -84,21 +115,39 @@ async function nextSequentialCode(Model, field, prefix, pad = 3, session) {
   const options = { new: true };
   if (session) options.session = session;
 
-  let updated = await Counter.findOneAndUpdate({ _id: key }, { $inc: { seq: 1 } }, options);
-  if (!updated) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let updated = await Counter.findOneAndUpdate({ _id: key }, { $inc: { seq: 1 } }, options);
+    if (!updated) {
+      const max = await currentMaxSeq(Model, field, prefix, session);
+      await raiseCounterTo(key, max, session);
+      updated = await Counter.findOneAndUpdate({ _id: key }, { $inc: { seq: 1 } }, options);
+    }
+    if (!updated) break;
+    const code = formatCode(prefix, updated.seq, pad);
+    if (!(await codeTaken(Model, field, code, session))) return code;
     const max = await currentMaxSeq(Model, field, prefix, session);
-    await seedCounter(key, max, session);
-    updated = await Counter.findOneAndUpdate({ _id: key }, { $inc: { seq: 1 } }, options);
+    await raiseCounterTo(key, max, session);
   }
-  if (!updated) {
-    throw new Error(`Failed to allocate next ${prefix} code`);
-  }
-  return formatCode(prefix, updated.seq, pad);
+
+  throw new Error(`Failed to allocate next ${prefix} code`);
 }
 
 async function peekSequentialCode(Model, field, prefix, pad = 3) {
-  const { seq } = await storedSeq(Model, field, prefix);
-  return formatCode(prefix, seq + 1, pad);
+  const { key, seq } = await storedSeq(Model, field, prefix);
+  const candidate = formatCode(prefix, seq + 1, pad);
+  if (!(await codeTaken(Model, field, candidate))) return candidate;
+  const max = await currentMaxSeq(Model, field, prefix);
+  await raiseCounterTo(key, max);
+  return formatCode(prefix, max + 1, pad);
 }
 
-module.exports = { nextSequentialCode, peekSequentialCode };
+async function useSequentialCode(Model, field, prefix, provided, pad = 3, session) {
+  const current = String(provided || '').trim();
+  if (current) {
+    await claimSequentialCode(Model, field, current, session);
+    if (!(await codeTaken(Model, field, current, session))) return current;
+  }
+  return nextSequentialCode(Model, field, prefix, pad, session);
+}
+
+module.exports = { nextSequentialCode, peekSequentialCode, claimSequentialCode, useSequentialCode };
