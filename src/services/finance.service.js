@@ -16,7 +16,7 @@ const {
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
-const { nextSequentialCode } = require('../utils/nextCode');
+const { nextSequentialCode, peekSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 const {
   PAYMENT_TERMS,
@@ -220,8 +220,10 @@ async function assertCategory(categoryId, session) {
   return category;
 }
 
-async function changeAccount(accountId, delta, session) {
-  await assertAccount(accountId, session);
+async function changeAccount(accountId, delta, session, options = {}) {
+  if (!options.verified) {
+    await assertAccount(accountId, session);
+  }
   if (delta < 0) {
     const updated = await Account.findOneAndUpdate(
       { _id: accountId, currentBalanceAmount: { $gte: -delta } },
@@ -260,11 +262,16 @@ async function changeStock(itemId, delta, session) {
 }
 
 async function buildSaleLines(rawLines, session) {
+  const ids = rawLines.map((raw) => raw.inventoryItemId);
+  const itemQuery = InventoryItem.find({ _id: { $in: ids } })
+    .populate('cylinderTypeId', 'sellingPricePerCylinder refillPriceAmount typeName typeCode');
+  if (session) itemQuery.session(session);
+  const items = await itemQuery;
+  const itemsById = new Map(items.map((item) => [String(item._id), item]));
+
   const lines = [];
   for (const raw of rawLines) {
-    const item = await InventoryItem.findById(raw.inventoryItemId)
-      .populate('cylinderTypeId', 'sellingPricePerCylinder refillPriceAmount typeName typeCode')
-      .session(session);
+    const item = itemsById.get(String(raw.inventoryItemId));
     if (!item) throw new ApiError(400, 'InventoryItem not found');
     if (!item.isActive) throw new ApiError(400, `Inventory item ${item.itemCode} is inactive`);
 
@@ -473,7 +480,7 @@ async function resolveReceiveAccount(accountId, session) {
 
 async function postSaleReceipt({ sale, customerId, amount, accountId, paymentMethod, paymentDate, referenceNumber, userId }, session) {
   const account = await resolveReceiveAccount(accountId, session);
-  await changeAccount(account._id, amount, session);
+  await changeAccount(account._id, amount, session, { verified: true });
   const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
   await Payment.create(
     [
@@ -518,7 +525,7 @@ async function postSaleRefund({
     throw new ApiError(400, `Refund exceeds refund due (${formatRs(refundDue)})`);
   }
 
-  await changeAccount(account._id, -amount, session);
+  await changeAccount(account._id, -amount, session, { verified: true });
   await applySalePayment(sale, -amount, session);
 
   const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
@@ -556,9 +563,13 @@ async function listCustomerCreditSales(customerId, session, excludeSaleId) {
   return query;
 }
 
+function sumCustomerCredit(sales) {
+  return roundMoney(sales.reduce((sum, sale) => sum + Math.max(0, -(sale.outstandingAmount || 0)), 0));
+}
+
 async function customerCreditAvailable(customerId, session, excludeSaleId) {
   const sales = await listCustomerCreditSales(customerId, session, excludeSaleId);
-  return roundMoney(sales.reduce((sum, sale) => sum + Math.max(0, -sale.outstandingAmount), 0));
+  return sumCustomerCredit(sales);
 }
 
 async function applyCustomerCreditToSale(sale, customerId, options, session) {
@@ -572,10 +583,9 @@ async function applyCustomerCreditToSale(sale, customerId, options, session) {
     return { appliedAmount: 0, applications: [] };
   }
 
-  const creditSales = await listCustomerCreditSales(customerId, session, sale._id);
-  let available = roundMoney(
-    creditSales.reduce((sum, creditSale) => sum + Math.max(0, -creditSale.outstandingAmount), 0)
-  );
+  const creditSales = options?.creditSales
+    || await listCustomerCreditSales(customerId, session, sale._id);
+  let available = sumCustomerCredit(creditSales);
   if (available <= 0) {
     return { appliedAmount: 0, applications: [] };
   }
@@ -723,7 +733,7 @@ async function postSupplierPayment({
   userId,
 }, session) {
   const account = await resolveReceiveAccount(accountId, session);
-  await changeAccount(account._id, -amount, session);
+  await changeAccount(account._id, -amount, session, { verified: true });
   const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
   await Payment.create(
     [
@@ -784,11 +794,16 @@ async function backfillReceiptPaymentBalances(filter = {}) {
   );
 }
 
-async function getSaleById(id) {
+async function loadSale(id) {
   const doc = await populateQuery(Sale.findById(id), SALE_POPULATE);
   if (!doc) throw new ApiError(404, 'Sale not found');
   const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
   const [sale] = await attachReceiptAccounts([toSaleItem(plain)]);
+  return sale;
+}
+
+async function getSaleById(id) {
+  const sale = await loadSale(id);
   const customerId = sale.customerId?._id || sale.customerId;
   return {
     ...sale,
@@ -932,9 +947,10 @@ async function listSales(query) {
 }
 
 async function getSaleFormOptions(query = {}) {
+  const invoiceYear = new Date().getFullYear();
   const [nextSaleNumber, nextInvoice, customers, inventoryItems, accounts] = await Promise.all([
-    nextSequentialCode(Sale, 'saleNumber', 'SAL', 3),
-    nextInvoiceNumber(),
+    peekSequentialCode(Sale, 'saleNumber', 'SAL', 3),
+    peekSequentialCode(Sale, 'invoiceNumber', `INV-${invoiceYear}`, 4),
     Customer.find({ isActive: true })
       .select('customerCode customerName phoneNumber paymentTermDays creditLimitAmount')
       .sort({ customerName: 1 })
@@ -1151,8 +1167,9 @@ async function listReturns(query) {
 
 async function getReturnFormOptions(query = {}) {
   const customerFilter = { isActive: true };
+  const returnYear = new Date().getFullYear();
   const [nextNumber, customers, accounts] = await Promise.all([
-    nextReturnNumber(),
+    peekSequentialCode(SalesReturn, 'returnNumber', `RET-${returnYear}`, 4),
     Customer.find(customerFilter)
       .select('customerCode customerName phoneNumber')
       .sort({ customerName: 1 })
@@ -1762,8 +1779,9 @@ async function listPayments(query) {
 
 async function getPaymentFormOptions(query = {}) {
   const paymentType = query.paymentType || query.direction;
+  const paymentYear = new Date().getFullYear();
   const [nextNumber, customers, suppliers, accounts] = await Promise.all([
-    nextPaymentNumber(),
+    peekSequentialCode(Payment, 'paymentNumber', `PAY-${paymentYear}`, 4),
     Customer.find({ isActive: true }).select('customerCode customerName phoneNumber').sort({ customerName: 1 }).lean(),
     Supplier.find({ isActive: true }).select('supplierCode supplierName phoneNumber').sort({ supplierName: 1 }).lean(),
     loadActiveAccounts(),
@@ -1986,7 +2004,7 @@ async function listExpenses(query) {
 
 async function getExpenseFormOptions() {
   const [nextNumber, categories, accounts] = await Promise.all([
-    nextExpenseNumber(),
+    peekSequentialCode(Expense, 'expenseNumber', 'EXP', 4),
     ExpenseCategory.find({ isActive: true }).select('categoryCode categoryName').sort({ categoryName: 1 }).lean(),
     loadActiveAccounts(),
   ]);
@@ -2014,8 +2032,10 @@ async function createSale(body, req) {
     const amountPaid = roundMoney(body.amountPaid ?? body.payment?.paymentAmount ?? 0);
     const applyCredit = !isDraft && body.applyCustomerCredit !== false;
     let creditToApply = 0;
+    let creditSales = [];
     if (applyCredit) {
-      creditToApply = await customerCreditAvailable(customer._id, session);
+      creditSales = await listCustomerCreditSales(customer._id, session);
+      creditToApply = sumCustomerCredit(creditSales);
       if (body.applyCustomerCreditAmount !== undefined && body.applyCustomerCreditAmount !== null) {
         creditToApply = roundMoney(Math.min(creditToApply, Number(body.applyCustomerCreditAmount) || 0));
       }
@@ -2092,6 +2112,7 @@ async function createSale(body, req) {
       await applyCustomerCreditToSale(sale, customer._id, {
         applyCredit: true,
         creditAmount: body.applyCustomerCreditAmount,
+        creditSales,
       }, session);
       sale.saleType = sale.outstandingAmount > 0 ? 'credit' : 'cash';
       await sale.save({ session });
@@ -2118,7 +2139,7 @@ async function createSale(body, req) {
   });
 
   invalidateFinance();
-  return getSaleById(result);
+  return loadSale(result);
 }
 
 async function applyDraftSaleFields(sale, body, session) {
@@ -2206,8 +2227,10 @@ async function updateSale(id, body, req) {
       const customer = await assertCustomer(sale.customerId, session);
       const applyCredit = body.applyCustomerCredit !== false;
       let creditToApply = 0;
+      let creditSales = [];
       if (applyCredit) {
-        creditToApply = await customerCreditAvailable(customer._id, session, sale._id);
+        creditSales = await listCustomerCreditSales(customer._id, session, sale._id);
+        creditToApply = sumCustomerCredit(creditSales);
         if (body.applyCustomerCreditAmount !== undefined && body.applyCustomerCreditAmount !== null) {
           creditToApply = roundMoney(Math.min(creditToApply, Number(body.applyCustomerCreditAmount) || 0));
         }
@@ -2238,6 +2261,7 @@ async function updateSale(id, body, req) {
         await applyCustomerCreditToSale(sale, customer._id, {
           applyCredit: true,
           creditAmount: body.applyCustomerCreditAmount,
+          creditSales,
         }, session);
         sale.saleType = sale.outstandingAmount > 0 ? 'credit' : 'cash';
       }
@@ -2280,7 +2304,7 @@ async function updateSale(id, body, req) {
   });
 
   invalidateFinance();
-  return getSaleById(result);
+  return loadSale(result);
 }
 
 async function soldQtyByItem(sale) {

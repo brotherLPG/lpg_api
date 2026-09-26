@@ -12,7 +12,7 @@ const {
 const cache = require('../config/cache');
 const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
-const { nextSequentialCode } = require('../utils/nextCode');
+const { nextSequentialCode, peekSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 const { receiptFinance } = require('./finance.service');
 const {
@@ -422,7 +422,7 @@ async function getReceiptFormOptions(query = {}) {
       .sort({ fullName: 1 })
       .lean(),
     StorageTank.findOne().sort({ createdAt: 1 }).lean(),
-    nextSequentialCode(LPGReceipt, 'receiptNumber', 'RCP'),
+    peekSequentialCode(LPGReceipt, 'receiptNumber', 'RCP'),
     receiptFinance.loadActiveAccounts(),
   ]);
 
@@ -483,7 +483,7 @@ async function getFillingFormOptions() {
       .sort({ fullName: 1 })
       .lean(),
     StorageTank.findOne().sort({ createdAt: 1 }).lean(),
-    nextSequentialCode(FillingBatch, 'batchNumber', 'FLL'),
+    peekSequentialCode(FillingBatch, 'batchNumber', 'FLL'),
   ]);
 
   if (!tank) {

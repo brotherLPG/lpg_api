@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const env = require('./env');
 const logger = require('../utils/logger');
+const Counter = require('../models/counter.model');
 
 const globalCache = globalThis;
 
@@ -27,7 +28,15 @@ async function connectDB() {
         socketTimeoutMS: 20000,
         maxIdleTimeMS: 10000,
       })
-      .then((connection) => {
+      .then(async (connection) => {
+        try {
+          await Counter.createCollection();
+        } catch (error) {
+          const alreadyExists = error?.code === 48 || error?.codeName === 'NamespaceExists';
+          if (!alreadyExists) {
+            logger.error('Counter collection setup failed', { message: error.message });
+          }
+        }
         logger.info('MongoDB connected');
         return connection;
       })

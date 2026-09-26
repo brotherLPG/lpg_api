@@ -20,6 +20,7 @@ const Payment = require('./payment.model');
 const Expense = require('./expense.model');
 const MaintenanceRecord = require('./maintenanceRecord.model');
 const Asset = require('./asset.model');
+const Counter = require('./counter.model');
 
 module.exports = {
   Permission,
@@ -44,4 +45,5 @@ module.exports = {
   Expense,
   MaintenanceRecord,
   Asset,
+  Counter,
 };

@@ -19,7 +19,7 @@ const {
 } = require('../models');
 const ApiError = require('../utils/ApiError');
 const cache = require('../config/cache');
-const { nextSequentialCode } = require('../utils/nextCode');
+const { peekSequentialCode } = require('../utils/nextCode');
 const { createMasterService } = require('./master.factory');
 const {
   TANK_STATUSES,
@@ -131,7 +131,7 @@ const customer = createMasterService({
 
 async function supplierFormOptions() {
   return {
-    nextSupplierCode: await nextSequentialCode(Supplier, 'supplierCode', 'SUP'),
+    nextSupplierCode: await peekSequentialCode(Supplier, 'supplierCode', 'SUP'),
     paymentTerms: PAYMENT_TERMS,
     statuses: ACTIVE_STATUSES,
   };
@@ -190,7 +190,7 @@ const cylinderType = createMasterService({
     statuses: ACTIVE_STATUSES,
   }),
   formOptions: async () => ({
-    nextTypeCode: await nextSequentialCode(CylinderType, 'typeCode', 'CYL'),
+    nextTypeCode: await peekSequentialCode(CylinderType, 'typeCode', 'CYL'),
     categories: CYLINDER_CATEGORIES,
     colorCodes: CYLINDER_COLOR_CODES,
     valveTypes: CYLINDER_VALVE_TYPES,
@@ -556,7 +556,7 @@ async function inventoryListSummary() {
 
 async function inventoryFormOptions() {
   const [nextItemCode, cylinderTypes, suppliers] = await Promise.all([
-    nextSequentialCode(InventoryItem, 'itemCode', 'ITM'),
+    peekSequentialCode(InventoryItem, 'itemCode', 'ITM'),
     CylinderType.find({ isActive: true })
       .select('typeCode typeName capacityKg cylinderCategory')
       .sort({ capacityKg: 1 })
@@ -711,7 +711,7 @@ function mapEmployee(employee) {
 
 async function employeeFormOptions() {
   return {
-    nextEmployeeCode: await nextSequentialCode(Employee, 'employeeCode', 'EMP'),
+    nextEmployeeCode: await peekSequentialCode(Employee, 'employeeCode', 'EMP'),
     departments: EMPLOYEE_DEPARTMENTS,
     genders: GENDER_OPTIONS,
     statuses: EMPLOYMENT_STATUS_OPTIONS,
@@ -885,7 +885,7 @@ async function accountFormOptions(query = {}) {
   if (excludeId) parentFilter._id = { $ne: excludeId };
 
   const [nextAccountCode, parentAccounts] = await Promise.all([
-    nextSequentialCode(Account, 'accountCode', 'ACC'),
+    peekSequentialCode(Account, 'accountCode', 'ACC'),
     Account.find(parentFilter).select('accountCode accountName accountType').sort({ accountCode: 1 }).lean(),
   ]);
 
@@ -1108,7 +1108,7 @@ async function loadActiveAccountsForForms() {
 
 async function assetFormOptions() {
   const [nextAssetCode, employees, accounts] = await Promise.all([
-    nextSequentialCode(Asset, 'assetCode', 'AST'),
+    peekSequentialCode(Asset, 'assetCode', 'AST'),
     loadAssignableEmployees(),
     loadActiveAccountsForForms(),
   ]);
@@ -1126,7 +1126,7 @@ async function assetFormOptions() {
 
 async function maintenanceRecordFormOptions() {
   const [nextMaintenanceNumber, assets, employees, accounts] = await Promise.all([
-    nextSequentialCode(MaintenanceRecord, 'maintenanceNumber', 'MNT'),
+    peekSequentialCode(MaintenanceRecord, 'maintenanceNumber', 'MNT'),
     Asset.find({ assetStatus: { $ne: 'disposed' } })
       .select('assetCode assetName assetCategory assetStatus locationName serialNumber')
       .sort({ assetName: 1 })
