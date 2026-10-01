@@ -136,6 +136,7 @@ const salesReturn = {
         z.object({
           inventoryItemId: objectId,
           quantity: positiveQty,
+          unitPriceAmount: nonNegative.optional(),
         })
       ).min(1),
       refundNow: z.boolean().optional(),

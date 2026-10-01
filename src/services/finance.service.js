@@ -549,6 +549,49 @@ async function postSaleRefund({
   return payment;
 }
 
+async function postReturnCashOut({
+  sale,
+  customerId,
+  amount,
+  accountId,
+  paymentMethod,
+  paymentDate,
+  referenceNumber,
+  userId,
+  remarks,
+}, session) {
+  const account = await resolveReceiveAccount(accountId, session);
+  await changeAccount(account._id, -amount, session, { verified: true });
+
+  const refundDue = sale.outstandingAmount < 0 ? roundMoney(-sale.outstandingAmount) : 0;
+  const settleAmount = roundMoney(Math.min(amount, refundDue, sale.paidAmount || 0));
+  if (settleAmount > 0) {
+    await applySalePayment(sale, -settleAmount, session);
+  }
+
+  const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
+  const [payment] = await Payment.create(
+    [
+      {
+        paymentNumber,
+        paymentType: 'refund',
+        customerId,
+        saleId: sale._id,
+        allocations: [{ saleId: sale._id, amountApplied: amount }],
+        accountId: account._id,
+        paymentAmount: amount,
+        paymentMethod: paymentMethodForAccount(account, paymentMethod),
+        paymentDate: resolveBusinessDate(paymentDate, sale.invoiceDate),
+        referenceNumber: referenceNumber || '',
+        remarks: remarks || `Refund for ${sale.invoiceNumber}`,
+        receivedOrPaidByUserId: userId,
+      },
+    ],
+    { session }
+  );
+  return payment;
+}
+
 async function listCustomerCreditSales(customerId, session, excludeSaleId) {
   const filter = {
     customerId,
@@ -1366,6 +1409,33 @@ async function nextPaymentNumber(session) {
   return nextSequentialCode(Payment, 'paymentNumber', `PAY-${year}`, 4, session);
 }
 
+async function linkedReturnRefundIds(customerFilter, session) {
+  let query = SalesReturn.find({
+    ...customerFilter,
+    refundPaymentId: { $ne: null },
+  }).select('refundPaymentId');
+  if (session) query = query.session(session);
+  const rows = await query.lean();
+  return rows.map((row) => row.refundPaymentId);
+}
+
+function refundedAmountSum(linkedRefundIds) {
+  return {
+    $sum: {
+      $cond: [
+        {
+          $and: [
+            { $eq: ['$paymentType', 'refund'] },
+            { $not: [{ $in: ['$_id', linkedRefundIds] }] },
+          ],
+        },
+        '$paymentAmount',
+        0,
+      ],
+    },
+  };
+}
+
 async function customerLedgerOutstanding(customerId, session) {
   const id = asObjectId(customerId);
   const saleMatch = { customerId: id, saleStatus: { $nin: ['cancelled', 'draft'] } };
@@ -1374,6 +1444,7 @@ async function customerLedgerOutstanding(customerId, session) {
     paymentType: { $in: ['receive', 'refund'] },
     paymentStatus: { $ne: 'pending' },
   };
+  const linkedRefundIds = await linkedReturnRefundIds({ customerId: id }, session);
 
   const salesAgg = Sale.aggregate([
     { $match: saleMatch },
@@ -1391,9 +1462,7 @@ async function customerLedgerOutstanding(customerId, session) {
         received: {
           $sum: { $cond: [{ $eq: ['$paymentType', 'receive'] }, '$paymentAmount', 0] },
         },
-        refunded: {
-          $sum: { $cond: [{ $eq: ['$paymentType', 'refund'] }, '$paymentAmount', 0] },
-        },
+        refunded: refundedAmountSum(linkedRefundIds),
       },
     },
   ]);
@@ -1414,6 +1483,7 @@ async function customerOutstandingByIds(customerIds = []) {
   if (!customerIds.length) return new Map();
 
   const ids = customerIds.map(asObjectId);
+  const linkedRefundIds = await linkedReturnRefundIds({ customerId: { $in: ids } });
   const [saleRows, returnRows, paymentRows] = await Promise.all([
     Sale.aggregate([
       { $match: { customerId: { $in: ids }, saleStatus: { $nin: ['cancelled', 'draft'] } } },
@@ -1437,9 +1507,7 @@ async function customerOutstandingByIds(customerIds = []) {
           received: {
             $sum: { $cond: [{ $eq: ['$paymentType', 'receive'] }, '$paymentAmount', 0] },
           },
-          refunded: {
-            $sum: { $cond: [{ $eq: ['$paymentType', 'refund'] }, '$paymentAmount', 0] },
-          },
+          refunded: refundedAmountSum(linkedRefundIds),
         },
       },
     ]),
@@ -2375,7 +2443,10 @@ async function createReturn(body, req) {
       if (raw.quantity > soldQty - returnedQty) {
         throw new ApiError(400, 'Return quantity exceeds remaining quantity for an item');
       }
-      const unitPriceAmount = saleLine.unitPriceAmount || 0;
+      const unitPriceAmount =
+        raw.unitPriceAmount === undefined || raw.unitPriceAmount === null
+          ? saleLine.unitPriceAmount || 0
+          : Number(raw.unitPriceAmount);
       returnItems.push({
         inventoryItemId: raw.inventoryItemId,
         quantity: raw.quantity,
@@ -2421,25 +2492,13 @@ async function createReturn(body, req) {
     sale.saleStatus = deriveSaleStatus(sale.returnedAmount, sale.totalAmount, sale.saleStatus);
     await sale.save({ session });
 
-    const refundDue = sale.outstandingAmount < 0 ? roundMoney(-sale.outstandingAmount) : 0;
-    const refundAmount = pickReturnRefundAmount(body, refundDue);
-    const wantsRefund = body.refundNow === true || refundAmount > 0;
-    if (wantsRefund) {
-      if (refundDue <= 0) {
-        throw new ApiError(400, 'No refund due after this return');
-      }
-      if (refundAmount <= 0) {
-        throw new ApiError(400, 'refundAmount must be greater than 0');
-      }
-      if (refundAmount > refundDue) {
-        throw new ApiError(400, `Refund exceeds refund due (${formatRs(refundDue)})`);
-      }
-
-      const refundPayment = await postSaleRefund({
+    const payoutAccountId = pickReturnRefundAccountId(body);
+    if (payoutAccountId && totalReturnAmount > 0) {
+      const refundPayment = await postReturnCashOut({
         sale,
         customerId,
-        amount: refundAmount,
-        accountId: pickReturnRefundAccountId(body),
+        amount: totalReturnAmount,
+        accountId: payoutAccountId,
         paymentMethod: body.paymentMethod || body.payment?.paymentMethod,
         paymentDate: body.returnDate,
         referenceNumber: body.referenceNumber || body.payment?.referenceNumber,
@@ -2447,9 +2506,40 @@ async function createReturn(body, req) {
         remarks: `Refund for return ${returnNumber} on ${sale.invoiceNumber}`,
       }, session);
 
-      doc.refundAmount = refundAmount;
+      doc.refundAmount = totalReturnAmount;
       doc.refundPaymentId = refundPayment._id;
       await doc.save({ session });
+    } else {
+      const refundDue = sale.outstandingAmount < 0 ? roundMoney(-sale.outstandingAmount) : 0;
+      const refundAmount = pickReturnRefundAmount(body, refundDue);
+      const wantsRefund = body.refundNow === true || refundAmount > 0;
+      if (wantsRefund) {
+        if (refundDue <= 0) {
+          throw new ApiError(400, 'No refund due after this return');
+        }
+        if (refundAmount <= 0) {
+          throw new ApiError(400, 'refundAmount must be greater than 0');
+        }
+        if (refundAmount > refundDue) {
+          throw new ApiError(400, `Refund exceeds refund due (${formatRs(refundDue)})`);
+        }
+
+        const refundPayment = await postSaleRefund({
+          sale,
+          customerId,
+          amount: refundAmount,
+          accountId: pickReturnRefundAccountId(body),
+          paymentMethod: body.paymentMethod || body.payment?.paymentMethod,
+          paymentDate: body.returnDate,
+          referenceNumber: body.referenceNumber || body.payment?.referenceNumber,
+          userId: req.user._id,
+          remarks: `Refund for return ${returnNumber} on ${sale.invoiceNumber}`,
+        }, session);
+
+        doc.refundAmount = refundAmount;
+        doc.refundPaymentId = refundPayment._id;
+        await doc.save({ session });
+      }
     }
 
     await writeAudit({
@@ -2908,7 +2998,17 @@ function withAfterBalance(item, id, balanceAfterById) {
   };
 }
 
+function returnPayoutIds(returns) {
+  return new Set(
+    (returns || [])
+      .map((item) => item.refundPaymentId)
+      .filter(Boolean)
+      .map((id) => String(id))
+  );
+}
+
 function computePaymentBalanceAfter(sales, returns, payments) {
+  const linkedRefundIds = returnPayoutIds(returns);
   const events = [];
 
   sales.forEach((sale) => {
@@ -2931,13 +3031,14 @@ function computePaymentBalanceAfter(sales, returns, payments) {
   });
 
   payments.forEach((item) => {
+    const isReturnPayout = item.paymentType === 'refund' && linkedRefundIds.has(String(item._id));
     events.push({
       type: item.paymentType === 'refund' ? 'refund' : 'receive',
       at: businessDayTimestamp(item.paymentDate, item.createdAt),
       createdAt: item.createdAt,
       amount: item.paymentAmount,
       id: String(item._id),
-      skip: item.paymentStatus === 'pending',
+      skip: item.paymentStatus === 'pending' || isReturnPayout,
     });
   });
 
@@ -2997,7 +3098,7 @@ async function getCustomerLedger(customerId) {
     customerLedgerOutstanding(customer._id),
     Payment.findOne(paymentMatch)
       .sort({ paymentDate: -1, createdAt: -1 })
-      .select('paymentNumber paymentAmount paymentDate paymentMethod')
+      .select('paymentNumber paymentAmount paymentDate paymentMethod paymentType')
       .lean(),
   ]);
 
@@ -3011,6 +3112,7 @@ async function getCustomerLedger(customerId) {
       lastPaymentAmount: lastPayment ? roundMoney(lastPayment.paymentAmount) : 0,
       lastPaymentDate: lastPayment?.paymentDate || null,
       lastPaymentNumber: lastPayment?.paymentNumber || null,
+      lastPaymentType: lastPayment?.paymentType || null,
       lastPaymentMethod: lastPayment?.paymentMethod || null,
       lastPaymentMethodLabel: lastPayment ? paymentMethodLabel(lastPayment.paymentMethod) : null,
       creditLimitAmount: roundMoney(customer.creditLimitAmount),
@@ -3032,7 +3134,7 @@ async function getCustomerSalesHistory(customerId, query = {}) {
     Sale.find({ customerId: customer._id, ...activeSaleMatch() })
       .select('totalAmount invoiceDate createdAt')
       .lean(),
-    SalesReturn.find({ customerId: customer._id }).select('totalReturnAmount returnDate createdAt').lean(),
+    SalesReturn.find({ customerId: customer._id }).select('totalReturnAmount returnDate createdAt refundPaymentId').lean(),
     Payment.find({ customerId: customer._id, paymentType: { $in: ['receive', 'refund'] } })
       .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
       .lean(),
@@ -3067,7 +3169,7 @@ async function getCustomerPaymentHistory(customerId, query = {}) {
     Sale.find({ customerId: customer._id, ...activeSaleMatch() })
       .select('totalAmount invoiceDate createdAt')
       .lean(),
-    SalesReturn.find({ customerId: customer._id }).select('totalReturnAmount returnDate createdAt').lean(),
+    SalesReturn.find({ customerId: customer._id }).select('totalReturnAmount returnDate createdAt refundPaymentId').lean(),
     Payment.find({ customerId: customer._id, paymentType: { $in: ['receive', 'refund'] } })
       .select('paymentAmount paymentDate paymentType paymentStatus createdAt')
       .lean(),
