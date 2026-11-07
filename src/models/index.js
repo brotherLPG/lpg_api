@@ -21,6 +21,7 @@ const Expense = require('./expense.model');
 const MaintenanceRecord = require('./maintenanceRecord.model');
 const Asset = require('./asset.model');
 const Counter = require('./counter.model');
+const ActivityLog = require('./activityLog.model');
 
 module.exports = {
   Permission,
@@ -46,4 +47,5 @@ module.exports = {
   MaintenanceRecord,
   Asset,
   Counter,
+  ActivityLog,
 };

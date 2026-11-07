@@ -8,6 +8,7 @@ const { connectDB, dbState } = require('./config/db');
 const routes = require('./routes');
 const notFound = require('./middlewares/notFound');
 const errorHandler = require('./middlewares/errorHandler');
+const requestLog = require('./middlewares/requestLog');
 
 require('./models');
 
@@ -76,6 +77,7 @@ app.get('/', (req, res) => {
   });
 });
 
+app.use(requestLog);
 app.use('/api', routes);
 app.use(notFound);
 app.use(errorHandler);

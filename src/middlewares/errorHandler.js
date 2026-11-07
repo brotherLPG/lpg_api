@@ -40,6 +40,8 @@ function errorHandler(err, req, res, next) {
     console.error(err);
   }
 
+  res.locals.activityMessage = message;
+
   res.status(statusCode).json({
     success: false,
     message,
