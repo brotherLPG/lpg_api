@@ -72,7 +72,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Brother LPG Plant ERP API',
+    message: 'Brother LPG Plant ERP API production',
     data: { version: '1.0.0', phase: 5 },
   });
 });
