@@ -72,7 +72,7 @@ app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'Brother LPG Plant ERP API Testing',
-    data: { version: '1.0.0', phase: 5 },
+    data: { version: '1.1.0', phase: 5 },
   });
 });
 
