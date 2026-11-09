@@ -202,7 +202,9 @@ const cylinderType = createMasterService({
     if (inUse > 0) {
       throw new ApiError(400, 'CylinderType is used by inventory items and cannot be deleted');
     }
-    const batches = await FillingBatch.countDocuments({ cylinderTypeId: doc._id });
+    const batches = await FillingBatch.countDocuments({
+      $or: [{ cylinderTypeId: doc._id }, { 'lines.cylinderTypeId': doc._id }],
+    });
     if (batches > 0) {
       throw new ApiError(400, 'CylinderType is used by filling batches and cannot be deleted');
     }
@@ -321,6 +323,7 @@ async function getTankDashboard(query = {}) {
       .lean(),
     FillingBatch.find({ storageTankId: tank._id })
       .populate('cylinderTypeId', 'typeCode typeName capacityKg cylinderCategory')
+      .populate('lines.cylinderTypeId', 'typeCode typeName capacityKg cylinderCategory')
       .sort({ fillingDate: -1, createdAt: -1 })
       .limit(recentLimit)
       .lean(),
@@ -351,15 +354,39 @@ async function getTankDashboard(query = {}) {
       supplierId: receipt.supplierId?._id || receipt.supplierId,
       supplierName: receipt.supplierId?.supplierName || '',
     })),
-    recentFillingBatches: batches.map((batch) => ({
-      _id: batch._id,
-      batchNumber: batch.batchNumber,
-      fillingDate: batch.fillingDate,
-      cylinderCount: batch.cylinderCount,
-      cylinderTypeId: batch.cylinderTypeId?._id || batch.cylinderTypeId,
-      typeName: batch.cylinderTypeId?.typeName || '',
-      cylinderDescription: cylinderDescription(batch.cylinderTypeId),
-    })),
+    recentFillingBatches: batches.map((batch) => {
+      const lines = Array.isArray(batch.lines) && batch.lines.length
+        ? batch.lines
+        : [{ cylinderTypeId: batch.cylinderTypeId, cylinderCount: batch.cylinderCount }];
+      const typeName = lines
+        .map((line) => {
+          const name = line.cylinderTypeId?.typeName || '';
+          if (!name) return '';
+          return lines.length > 1 ? `${name} × ${line.cylinderCount}` : name;
+        })
+        .filter(Boolean)
+        .join(', ');
+      const cylinderTypeLabel = lines
+        .map((line) => cylinderDescription(line.cylinderTypeId))
+        .filter(Boolean)
+        .join(', ');
+
+      return {
+        _id: batch._id,
+        batchNumber: batch.batchNumber,
+        fillingDate: batch.fillingDate,
+        cylinderCount: batch.cylinderCount,
+        cylinderTypeId: batch.cylinderTypeId?._id || batch.cylinderTypeId,
+        typeName,
+        cylinderDescription: cylinderTypeLabel,
+        lines: lines.map((line) => ({
+          cylinderTypeId: line.cylinderTypeId?._id || line.cylinderTypeId,
+          typeName: line.cylinderTypeId?.typeName || '',
+          cylinderCount: line.cylinderCount,
+          targetFillWeightKg: line.targetFillWeightKg,
+        })),
+      };
+    }),
   };
 }
 

@@ -1,5 +1,36 @@
 const mongoose = require('mongoose');
 
+const fillingLineSchema = new mongoose.Schema(
+  {
+    cylinderTypeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CylinderType',
+      required: [true, 'cylinderTypeId is required'],
+    },
+    cylinderCount: {
+      type: Number,
+      required: [true, 'cylinderCount is required'],
+      min: [1, 'cylinderCount must be at least 1'],
+    },
+    targetFillWeightKg: {
+      type: Number,
+      required: [true, 'targetFillWeightKg is required'],
+      min: [0.01, 'targetFillWeightKg must be greater than 0'],
+    },
+    residualRecoveredKg: {
+      type: Number,
+      min: [0, 'residualRecoveredKg cannot be negative'],
+      default: 0,
+    },
+    actualLpgUsedKg: {
+      type: Number,
+      required: [true, 'actualLpgUsedKg is required'],
+      min: [0.01, 'actualLpgUsedKg must be greater than 0'],
+    },
+  },
+  { _id: false }
+);
+
 const fillingBatchSchema = new mongoose.Schema(
   {
     batchNumber: {
@@ -12,6 +43,12 @@ const fillingBatchSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'StorageTank',
       required: [true, 'storageTankId is required'],
+    },
+    // Totals for the whole batch. Per-type breakdown is `lines`.
+    // cylinderTypeId stays as the first line so older records and filters still resolve.
+    lines: {
+      type: [fillingLineSchema],
+      default: undefined,
     },
     cylinderTypeId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -65,6 +102,7 @@ const fillingBatchSchema = new mongoose.Schema(
 fillingBatchSchema.index({ fillingDate: -1 });
 fillingBatchSchema.index({ storageTankId: 1, fillingDate: -1 });
 fillingBatchSchema.index({ cylinderTypeId: 1, fillingDate: -1 });
+fillingBatchSchema.index({ 'lines.cylinderTypeId': 1, fillingDate: -1 });
 fillingBatchSchema.index({ batchStatus: 1, fillingDate: -1 });
 
 module.exports = mongoose.model('FillingBatch', fillingBatchSchema);

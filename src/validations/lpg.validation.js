@@ -67,21 +67,30 @@ const receiptUpdateBody = {
   ...receiptPaymentFields,
 };
 
-const fillingCreateBody = {
-  batchNumber: optionalCode,
-  storageTankId: objectId.optional(),
+const fillingLine = z.object({
   cylinderTypeId: objectId,
   cylinderCount: z.coerce.number().int().min(1),
   targetFillWeightKg: positiveKg,
   residualRecoveredKg: nonNegative.optional(),
   actualLpgUsedKg: positiveKg.optional(),
-  fillingDate: z.coerce.date(),
-  operatorEmployeeId: objectId,
-  remarks: z.string().trim().max(1000).optional(),
-  batchStatus: z.enum(BATCH_STATUS_VALUES).optional(),
-};
+});
 
-const fillingUpdateBody = {
+function rejectDuplicateCylinderTypes(lines, ctx) {
+  if (!lines?.length) return;
+  const seen = new Set();
+  lines.forEach((line, index) => {
+    if (seen.has(line.cylinderTypeId)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['lines', index, 'cylinderTypeId'],
+        message: 'Each cylinder type can be added only once in a filling batch',
+      });
+    }
+    seen.add(line.cylinderTypeId);
+  });
+}
+
+const fillingCreateBody = z.object({
   batchNumber: optionalCode,
   storageTankId: objectId.optional(),
   cylinderTypeId: objectId.optional(),
@@ -89,11 +98,55 @@ const fillingUpdateBody = {
   targetFillWeightKg: positiveKg.optional(),
   residualRecoveredKg: nonNegative.optional(),
   actualLpgUsedKg: positiveKg.optional(),
+  lines: z.array(fillingLine).min(1).max(20).optional(),
+  fillingDate: z.coerce.date(),
+  operatorEmployeeId: objectId,
+  remarks: z.string().trim().max(1000).optional(),
+  batchStatus: z.enum(BATCH_STATUS_VALUES).optional(),
+}).superRefine((body, ctx) => {
+  if (body.lines?.length) {
+    rejectDuplicateCylinderTypes(body.lines, ctx);
+    return;
+  }
+  if (!body.cylinderTypeId) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['lines'],
+      message: 'Add at least one cylinder type',
+    });
+  }
+  if (!body.cylinderCount) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['cylinderCount'],
+      message: 'cylinderCount is required',
+    });
+  }
+  if (body.targetFillWeightKg == null) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['targetFillWeightKg'],
+      message: 'targetFillWeightKg is required',
+    });
+  }
+});
+
+const fillingUpdateBody = z.object({
+  batchNumber: optionalCode,
+  storageTankId: objectId.optional(),
+  cylinderTypeId: objectId.optional(),
+  cylinderCount: z.coerce.number().int().min(1).optional(),
+  targetFillWeightKg: positiveKg.optional(),
+  residualRecoveredKg: nonNegative.optional(),
+  actualLpgUsedKg: positiveKg.optional(),
+  lines: z.array(fillingLine).min(1).max(20).optional(),
   fillingDate: optionalDate,
   operatorEmployeeId: objectId.optional(),
   remarks: z.string().trim().max(1000).optional(),
   batchStatus: z.enum(BATCH_STATUS_VALUES).optional(),
-};
+}).superRefine((body, ctx) => {
+  if (body.lines?.length) rejectDuplicateCylinderTypes(body.lines, ctx);
+});
 
 const receiptList = listMasterQuery({
   supplierId: objectId.optional(),
@@ -126,10 +179,10 @@ const lpgReceipt = {
 };
 
 const fillingBatch = {
-  create: z.object({ body: z.object(fillingCreateBody) }),
+  create: z.object({ body: fillingCreateBody }),
   update: z.object({
     params: z.object({ id: objectId }),
-    body: atLeastOneField(z.object(fillingUpdateBody)),
+    body: atLeastOneField(fillingUpdateBody),
   }),
   list: fillingList,
   idParam: idParamSchema,

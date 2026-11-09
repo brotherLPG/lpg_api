@@ -32,6 +32,7 @@ const RECEIPT_POPULATE = [
 const FILLING_POPULATE = [
   { path: 'storageTankId', select: 'tankCode tankName capacityKg currentQuantityKg tankStatus' },
   { path: 'cylinderTypeId', select: 'typeCode typeName capacityKg cylinderCategory sellingPricePerCylinder isActive' },
+  { path: 'lines.cylinderTypeId', select: 'typeCode typeName capacityKg cylinderCategory sellingPricePerCylinder isActive' },
   { path: 'operatorEmployeeId', select: 'employeeCode fullName jobTitle employmentStatus' },
   { path: 'createdByUserId', select: 'fullName emailAddress' },
 ];
@@ -197,24 +198,77 @@ function tankDisplayName(tank) {
   return `${tank.tankCode} — ${tank.tankName} (${current.toLocaleString('en-US')} / ${capacity.toLocaleString('en-US')} KG)`;
 }
 
+function populatedCylinderType(value) {
+  return value && value.typeName ? value : null;
+}
+
+function sourceFillingLines(doc) {
+  if (Array.isArray(doc.lines) && doc.lines.length > 0) return doc.lines;
+  return [{
+    cylinderTypeId: doc.cylinderTypeId,
+    cylinderCount: doc.cylinderCount,
+    targetFillWeightKg: doc.targetFillWeightKg,
+    residualRecoveredKg: doc.residualRecoveredKg || 0,
+    actualLpgUsedKg: doc.actualLpgUsedKg,
+  }];
+}
+
+function mapFillingLine(line) {
+  const type = populatedCylinderType(line.cylinderTypeId);
+  const cylinderCount = Number(line.cylinderCount) || 0;
+  const targetFillWeightKg = Number(line.targetFillWeightKg) || 0;
+  const residualRecoveredKg = Number(line.residualRecoveredKg) || 0;
+  const expectedFillKg = roundMoney(cylinderCount * targetFillWeightKg);
+  const actualLpgUsedKg = line.actualLpgUsedKg != null
+    ? roundMoney(line.actualLpgUsedKg)
+    : expectedFillKg;
+
+  return {
+    cylinderTypeId: type?._id || line.cylinderTypeId || null,
+    cylinderTypeName: type?.typeName || '',
+    cylinderType: type
+      ? {
+          _id: type._id,
+          typeCode: type.typeCode,
+          typeName: type.typeName,
+          capacityKg: type.capacityKg,
+        }
+      : null,
+    cylinderCount,
+    targetFillWeightKg,
+    expectedFillKg,
+    residualRecoveredKg,
+    actualLpgUsedKg,
+  };
+}
+
 function toFillingItem(doc) {
   const batchStatus = batchStatusOf(doc);
   const tank = doc.storageTankId && doc.storageTankId.tankCode ? doc.storageTankId : null;
-  const type = doc.cylinderTypeId && doc.cylinderTypeId.typeName ? doc.cylinderTypeId : null;
   const operator = doc.operatorEmployeeId && doc.operatorEmployeeId.fullName ? doc.operatorEmployeeId : null;
-
-  const residualRecoveredKg = Number(doc.residualRecoveredKg) || 0;
-  const expectedFillKg = roundMoney(doc.cylinderCount * doc.targetFillWeightKg);
+  const lines = sourceFillingLines(doc).map(mapFillingLine);
+  const first = lines[0] || {};
+  const cylinderCount = lines.reduce((sum, line) => sum + line.cylinderCount, 0);
+  const expectedFillKg = roundMoney(lines.reduce((sum, line) => sum + line.expectedFillKg, 0));
+  const residualRecoveredKg = roundMoney(lines.reduce((sum, line) => sum + line.residualRecoveredKg, 0));
+  const actualLpgUsedKg = roundMoney(lines.reduce((sum, line) => sum + line.actualLpgUsedKg, 0));
+  const cylinderTypeName = lines.length > 1
+    ? lines
+      .filter((line) => line.cylinderTypeName)
+      .map((line) => `${line.cylinderTypeName} × ${line.cylinderCount}`)
+      .join(', ')
+    : (first.cylinderTypeName || '');
 
   return {
     _id: doc._id,
     batchNumber: doc.batchNumber,
     fillingDate: doc.fillingDate,
-    cylinderCount: doc.cylinderCount,
-    targetFillWeightKg: doc.targetFillWeightKg,
+    cylinderCount,
+    targetFillWeightKg: first.targetFillWeightKg ?? doc.targetFillWeightKg,
     expectedFillKg,
     residualRecoveredKg,
-    actualLpgUsedKg: doc.actualLpgUsedKg,
+    actualLpgUsedKg,
+    lines,
     remarks: doc.remarks || '',
     batchStatus,
     batchStatusLabel: batchStatusLabel(batchStatus),
@@ -230,16 +284,9 @@ function toFillingItem(doc) {
           displayName: tankDisplayName(tank),
         }
       : null,
-    cylinderTypeId: type?._id || doc.cylinderTypeId || null,
-    cylinderTypeName: type?.typeName || '',
-    cylinderType: type
-      ? {
-          _id: type._id,
-          typeCode: type.typeCode,
-          typeName: type.typeName,
-          capacityKg: type.capacityKg,
-        }
-      : null,
+    cylinderTypeId: first.cylinderTypeId || doc.cylinderTypeId || null,
+    cylinderTypeName,
+    cylinderType: first.cylinderType || null,
     operatorEmployeeId: operator?._id || doc.operatorEmployeeId || null,
     operatorName: employeeLabel(operator),
     operator: operator
@@ -632,7 +679,15 @@ async function listFillings(query) {
   const { page, limit, skip } = parsePagination(query);
   const filter = applyDateRange({}, 'fillingDate', query);
   if (query.storageTankId) filter.storageTankId = query.storageTankId;
-  if (query.cylinderTypeId) filter.cylinderTypeId = query.cylinderTypeId;
+  if (query.cylinderTypeId) {
+    filter.$and = filter.$and || [];
+    filter.$and.push({
+      $or: [
+        { cylinderTypeId: query.cylinderTypeId },
+        { 'lines.cylinderTypeId': query.cylinderTypeId },
+      ],
+    });
+  }
   if (query.operatorEmployeeId) filter.operatorEmployeeId = query.operatorEmployeeId;
   if (query.batchStatus === 'pending') {
     filter.batchStatus = 'pending';
@@ -653,6 +708,7 @@ async function listFillings(query) {
       { remarks: regex },
       { storageTankId: { $in: tanks.map((item) => item._id) } },
       { cylinderTypeId: { $in: types.map((item) => item._id) } },
+      { 'lines.cylinderTypeId': { $in: types.map((item) => item._id) } },
       { operatorEmployeeId: { $in: operators.map((item) => item._id) } },
     ];
   }
@@ -938,46 +994,71 @@ async function updateReceipt(id, body, req) {
   return getReceiptById(result);
 }
 
-async function applyFillingStock({ storageTankId, cylinderTypeId, cylinderCount, actualLpgUsedKg }, session) {
+async function applyFillingLines({ storageTankId, lines }, session) {
   await assertTank(storageTankId, session);
-  const cylinderType = await assertCylinderType(cylinderTypeId, session);
-  const filledItem = await findCylinderStock(cylinderTypeId, 'filled-cylinder', session);
-  if (!filledItem) {
-    throw new ApiError(400, 'No active filled inventory item for this cylinder type');
+  const totalUsedKg = roundMoney(lines.reduce((sum, line) => sum + Number(line.actualLpgUsedKg || 0), 0));
+  const tank = await decrementTank(storageTankId, totalUsedKg, session);
+
+  for (const line of lines) {
+    const filledItem = await findCylinderStock(line.cylinderTypeId, 'filled-cylinder', session);
+    if (!filledItem) {
+      const cylinderType = await CylinderType.findById(line.cylinderTypeId).session(session);
+      const name = cylinderType?.typeName || 'this cylinder type';
+      throw new ApiError(400, `No active filled inventory item for ${name}`);
+    }
+    await incrementFilled(filledItem._id, line.cylinderCount, session);
   }
 
-  const tank = await decrementTank(storageTankId, actualLpgUsedKg, session);
-  const filled = await incrementFilled(filledItem._id, cylinderCount, session);
-
-  return { cylinderType, tank, filled };
+  return tank;
 }
 
-async function reverseFillingStock({ storageTankId, cylinderTypeId, cylinderCount, actualLpgUsedKg }, session) {
-  await restoreTank(storageTankId, actualLpgUsedKg, session);
-  const filledItem = await findCylinderStock(cylinderTypeId, 'filled-cylinder', session);
-  if (filledItem) {
+async function reverseFillingLines({ storageTankId, lines }, session) {
+  const totalUsedKg = roundMoney(lines.reduce((sum, line) => sum + Number(line.actualLpgUsedKg || 0), 0));
+  await restoreTank(storageTankId, totalUsedKg, session);
+
+  for (const line of lines) {
+    const filledItem = await findCylinderStock(line.cylinderTypeId, 'filled-cylinder', session);
+    if (!filledItem) continue;
     const updated = await InventoryItem.findOneAndUpdate(
-      { _id: filledItem._id, currentQuantity: { $gte: cylinderCount } },
-      { $inc: { currentQuantity: -cylinderCount } },
+      { _id: filledItem._id, currentQuantity: { $gte: line.cylinderCount } },
+      { $inc: { currentQuantity: -line.cylinderCount } },
       { new: true, session }
     );
     if (!updated) {
-      throw new ApiError(400, 'Cannot reverse filling; filled stock was already used');
+      const cylinderType = await CylinderType.findById(line.cylinderTypeId).session(session);
+      const name = cylinderType?.typeName || 'this cylinder type';
+      throw new ApiError(400, `Cannot reverse filling; filled stock for ${name} was already used`);
     }
   }
 }
 
+function valueProvided(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
 function resolveFillingQty(body, cylinderType, existing) {
+  const label = cylinderType?.typeName || '';
+  const fail = (message) => {
+    throw new ApiError(400, label ? `${label}: ${message}` : message);
+  };
+
   const cylinderCount = body.cylinderCount ?? existing?.cylinderCount;
   const targetFillWeightKg = body.targetFillWeightKg ?? existing?.targetFillWeightKg ?? cylinderType.capacityKg;
+  if (!cylinderCount || Number(cylinderCount) < 1) {
+    fail('cylinder count must be at least 1');
+  }
   const expectedFillKg = roundMoney(cylinderCount * targetFillWeightKg);
 
-  const residualProvided = body.residualRecoveredKg !== undefined;
-  const actualProvided = body.actualLpgUsedKg !== undefined;
+  const residualProvided = valueProvided(body.residualRecoveredKg);
+  const actualProvided = valueProvided(body.actualLpgUsedKg);
 
   let residualRecoveredKg = residualProvided
     ? Number(body.residualRecoveredKg)
     : Number(existing?.residualRecoveredKg || 0);
+
+  const sameSize = existing
+    && Number(cylinderCount) === Number(existing.cylinderCount)
+    && roundMoney(targetFillWeightKg) === roundMoney(existing.targetFillWeightKg);
 
   let actualLpgUsedKg;
   if (actualProvided) {
@@ -987,54 +1068,151 @@ function resolveFillingQty(body, cylinderType, existing) {
     }
   } else if (residualProvided) {
     actualLpgUsedKg = roundMoney(expectedFillKg - residualRecoveredKg);
-  } else if (existing?.actualLpgUsedKg != null) {
+  } else if (existing?.actualLpgUsedKg != null && sameSize) {
     actualLpgUsedKg = Number(existing.actualLpgUsedKg);
   } else {
-    actualLpgUsedKg = expectedFillKg;
+    actualLpgUsedKg = roundMoney(expectedFillKg - residualRecoveredKg);
   }
 
   residualRecoveredKg = roundMoney(residualRecoveredKg);
   actualLpgUsedKg = roundMoney(actualLpgUsedKg);
 
   if (residualRecoveredKg < 0) {
-    throw new ApiError(400, 'residualRecoveredKg cannot be negative');
+    fail('residual recovered cannot be negative');
   }
   if (residualRecoveredKg >= expectedFillKg) {
-    throw new ApiError(400, 'residualRecoveredKg must be less than expected fill (cylinderCount × targetFillWeightKg)');
+    fail('residual recovered must be less than expected fill (count × fill weight)');
   }
   if (actualLpgUsedKg <= 0) {
-    throw new ApiError(400, 'actualLpgUsedKg must be greater than 0');
+    fail('actual LPG used must be greater than 0');
   }
   if (actualProvided && residualProvided) {
     const sum = roundMoney(actualLpgUsedKg + residualRecoveredKg);
     if (Math.abs(sum - expectedFillKg) > 0.01) {
-      throw new ApiError(
-        400,
-        `actualLpgUsedKg (${actualLpgUsedKg}) + residualRecoveredKg (${residualRecoveredKg}) must equal expected fill ${expectedFillKg}`
-      );
+      fail(`actual LPG used (${actualLpgUsedKg}) + residual (${residualRecoveredKg}) must equal expected fill ${expectedFillKg}`);
     }
   }
 
-  return { cylinderCount, targetFillWeightKg, expectedFillKg, residualRecoveredKg, actualLpgUsedKg };
+  return { cylinderCount: Number(cylinderCount), targetFillWeightKg, expectedFillKg, residualRecoveredKg, actualLpgUsedKg };
+}
+
+function rawLinesFromBody(body) {
+  if (Array.isArray(body?.lines) && body.lines.length > 0) return body.lines;
+  if (body?.cylinderTypeId) {
+    return [{
+      cylinderTypeId: body.cylinderTypeId,
+      cylinderCount: body.cylinderCount,
+      targetFillWeightKg: body.targetFillWeightKg,
+      residualRecoveredKg: body.residualRecoveredKg,
+      actualLpgUsedKg: body.actualLpgUsedKg,
+    }];
+  }
+  return null;
+}
+
+function storedLines(doc) {
+  if (Array.isArray(doc?.lines) && doc.lines.length > 0) {
+    return doc.lines.map((line) => ({
+      cylinderTypeId: line.cylinderTypeId?._id || line.cylinderTypeId,
+      cylinderCount: line.cylinderCount,
+      targetFillWeightKg: line.targetFillWeightKg,
+      residualRecoveredKg: Number(line.residualRecoveredKg) || 0,
+      actualLpgUsedKg: line.actualLpgUsedKg,
+    }));
+  }
+  if (!doc?.cylinderTypeId) return [];
+  return [{
+    cylinderTypeId: doc.cylinderTypeId?._id || doc.cylinderTypeId,
+    cylinderCount: doc.cylinderCount,
+    targetFillWeightKg: doc.targetFillWeightKg,
+    residualRecoveredKg: Number(doc.residualRecoveredKg) || 0,
+    actualLpgUsedKg: doc.actualLpgUsedKg,
+  }];
+}
+
+function summarizeLines(lines) {
+  const cylinderCount = lines.reduce((sum, line) => sum + Number(line.cylinderCount || 0), 0);
+  const expectedFillKg = roundMoney(
+    lines.reduce((sum, line) => sum + Number(line.cylinderCount || 0) * Number(line.targetFillWeightKg || 0), 0)
+  );
+  const residualRecoveredKg = roundMoney(
+    lines.reduce((sum, line) => sum + Number(line.residualRecoveredKg || 0), 0)
+  );
+  const actualLpgUsedKg = roundMoney(
+    lines.reduce((sum, line) => sum + Number(line.actualLpgUsedKg || 0), 0)
+  );
+
+  return {
+    lines,
+    cylinderCount,
+    targetFillWeightKg: Number(lines[0]?.targetFillWeightKg) || 0,
+    expectedFillKg,
+    residualRecoveredKg,
+    actualLpgUsedKg,
+    cylinderTypeId: lines[0]?.cylinderTypeId || null,
+  };
+}
+
+function linesSignature(lines) {
+  return [...lines]
+    .map((line) => [
+      String(line.cylinderTypeId?._id || line.cylinderTypeId),
+      Number(line.cylinderCount),
+      roundMoney(line.targetFillWeightKg),
+      roundMoney(line.residualRecoveredKg || 0),
+      roundMoney(line.actualLpgUsedKg),
+    ].join(':'))
+    .sort()
+    .join('|');
+}
+
+async function resolveBatchLines(body, session, existingDoc) {
+  const incoming = rawLinesFromBody(body);
+  const previous = storedLines(existingDoc);
+  if (!incoming) {
+    if (!previous.length) {
+      throw new ApiError(400, 'At least one cylinder type is required');
+    }
+    return summarizeLines(previous);
+  }
+
+  const seen = new Set();
+  const lines = [];
+  for (const raw of incoming) {
+    const typeId = String(raw.cylinderTypeId?._id || raw.cylinderTypeId || '');
+    if (seen.has(typeId)) {
+      throw new ApiError(400, 'Each cylinder type can be added only once in a filling batch');
+    }
+    seen.add(typeId);
+    const cylinderType = await assertCylinderType(typeId, session);
+    const previousLine = previous.find((line) => String(line.cylinderTypeId) === String(cylinderType._id));
+    const qty = resolveFillingQty(raw, cylinderType, previousLine);
+    lines.push({
+      cylinderTypeId: cylinderType._id,
+      cylinderCount: qty.cylinderCount,
+      targetFillWeightKg: qty.targetFillWeightKg,
+      residualRecoveredKg: qty.residualRecoveredKg,
+      actualLpgUsedKg: qty.actualLpgUsedKg,
+    });
+  }
+
+  return summarizeLines(lines);
 }
 
 async function createFilling(body, req) {
   const result = await withTransaction(async (session) => {
     await assertEmployee(body.operatorEmployeeId, session);
-    const cylinderType = await assertCylinderType(body.cylinderTypeId, session);
-    const qty = resolveFillingQty(body, cylinderType);
+    const summary = await resolveBatchLines(body, session);
     const storageTankId = await resolveTankId(body.storageTankId, session);
     const tank = await StorageTank.findById(storageTankId).session(session);
     const batchStatus = resolveBatchStatus(body, 'pending');
     const quantityBeforeKg = tank?.currentQuantityKg || 0;
 
-    let stock = { tank, filled: null };
+    let stockTank = tank;
     if (batchStatus === 'completed') {
-      stock = await applyFillingStock({
+      stockTank = await applyFillingLines({
         storageTankId,
-        cylinderTypeId: body.cylinderTypeId,
-        cylinderCount: qty.cylinderCount,
-        actualLpgUsedKg: qty.actualLpgUsedKg,
+        lines: summary.lines,
       }, session);
     }
 
@@ -1042,11 +1220,12 @@ async function createFilling(body, req) {
     const payload = {
       batchNumber,
       storageTankId,
-      cylinderTypeId: body.cylinderTypeId,
-      cylinderCount: qty.cylinderCount,
-      targetFillWeightKg: qty.targetFillWeightKg,
-      residualRecoveredKg: qty.residualRecoveredKg,
-      actualLpgUsedKg: qty.actualLpgUsedKg,
+      lines: summary.lines,
+      cylinderTypeId: summary.cylinderTypeId,
+      cylinderCount: summary.cylinderCount,
+      targetFillWeightKg: summary.targetFillWeightKg,
+      residualRecoveredKg: summary.residualRecoveredKg,
+      actualLpgUsedKg: summary.actualLpgUsedKg,
       fillingDate: body.fillingDate,
       operatorEmployeeId: body.operatorEmployeeId,
       createdByUserId: req.user._id,
@@ -1055,7 +1234,7 @@ async function createFilling(body, req) {
     };
 
     const [doc] = await FillingBatch.create([payload], { session });
-    const quantityAfterKg = stock.tank?.currentQuantityKg ?? quantityBeforeKg;
+    const quantityAfterKg = stockTank?.currentQuantityKg ?? quantityBeforeKg;
     await writeAudit({
       req,
       session,
@@ -1076,9 +1255,10 @@ async function createFilling(body, req) {
         tankName: tank.tankName,
         quantityBeforeKg,
         quantityAfterKg,
-        expectedFillKg: qty.expectedFillKg,
-        residualRecoveredKg: qty.residualRecoveredKg,
-        lpgUsedKg: qty.actualLpgUsedKg,
+        expectedFillKg: summary.expectedFillKg,
+        residualRecoveredKg: summary.residualRecoveredKg,
+        lpgUsedKg: summary.actualLpgUsedKg,
+        lineCount: summary.lines.length,
         applied: batchStatus === 'completed',
       },
     };
@@ -1108,7 +1288,6 @@ async function updateFilling(id, body, req) {
     }
 
     const nextTankId = body.storageTankId || existing.storageTankId;
-    const nextTypeId = body.cylinderTypeId || existing.cylinderTypeId;
     const nextEmployeeId = body.operatorEmployeeId || existing.operatorEmployeeId;
     const previousStatus = batchStatusOf(existing);
     const nextStatus = resolveBatchStatus(body, previousStatus);
@@ -1116,44 +1295,33 @@ async function updateFilling(id, body, req) {
       await assertEmployee(nextEmployeeId, session);
     }
 
-    const cylinderType = await assertCylinderType(nextTypeId, session);
-    const qty = resolveFillingQty(body, cylinderType, existing);
+    const previousLines = storedLines(existing);
+    const summary = await resolveBatchLines(body, session, existing);
 
     const stockChanged =
-      qty.cylinderCount !== existing.cylinderCount
-      || qty.actualLpgUsedKg !== existing.actualLpgUsedKg
-      || qty.residualRecoveredKg !== (Number(existing.residualRecoveredKg) || 0)
-      || String(nextTankId) !== String(existing.storageTankId)
-      || String(nextTypeId) !== String(existing.cylinderTypeId);
+      String(nextTankId) !== String(existing.storageTankId)
+      || linesSignature(summary.lines) !== linesSignature(previousLines);
     const wasCompleted = previousStatus === 'completed';
     const willComplete = nextStatus === 'completed';
 
     if (wasCompleted && willComplete && stockChanged) {
-      await reverseFillingStock({
+      await reverseFillingLines({
         storageTankId: existing.storageTankId,
-        cylinderTypeId: existing.cylinderTypeId,
-        cylinderCount: existing.cylinderCount,
-        actualLpgUsedKg: existing.actualLpgUsedKg,
+        lines: previousLines,
       }, session);
-      await applyFillingStock({
+      await applyFillingLines({
         storageTankId: nextTankId,
-        cylinderTypeId: nextTypeId,
-        cylinderCount: qty.cylinderCount,
-        actualLpgUsedKg: qty.actualLpgUsedKg,
+        lines: summary.lines,
       }, session);
     } else if (!wasCompleted && willComplete) {
-      await applyFillingStock({
+      await applyFillingLines({
         storageTankId: nextTankId,
-        cylinderTypeId: nextTypeId,
-        cylinderCount: qty.cylinderCount,
-        actualLpgUsedKg: qty.actualLpgUsedKg,
+        lines: summary.lines,
       }, session);
     } else if (wasCompleted && !willComplete) {
-      await reverseFillingStock({
+      await reverseFillingLines({
         storageTankId: existing.storageTankId,
-        cylinderTypeId: existing.cylinderTypeId,
-        cylinderCount: existing.cylinderCount,
-        actualLpgUsedKg: existing.actualLpgUsedKg,
+        lines: previousLines,
       }, session);
     }
 
@@ -1163,15 +1331,18 @@ async function updateFilling(id, body, req) {
       actualLpgUsedKg: existing.actualLpgUsedKg,
       storageTankId: existing.storageTankId,
       cylinderTypeId: existing.cylinderTypeId,
+      lines: previousLines,
     };
 
     existing.batchNumber = body.batchNumber || existing.batchNumber;
     existing.storageTankId = nextTankId;
-    existing.cylinderTypeId = nextTypeId;
-    existing.cylinderCount = qty.cylinderCount;
-    existing.targetFillWeightKg = qty.targetFillWeightKg;
-    existing.residualRecoveredKg = qty.residualRecoveredKg;
-    existing.actualLpgUsedKg = qty.actualLpgUsedKg;
+    existing.lines = summary.lines;
+    existing.markModified('lines');
+    existing.cylinderTypeId = summary.cylinderTypeId;
+    existing.cylinderCount = summary.cylinderCount;
+    existing.targetFillWeightKg = summary.targetFillWeightKg;
+    existing.residualRecoveredKg = summary.residualRecoveredKg;
+    existing.actualLpgUsedKg = summary.actualLpgUsedKg;
     existing.operatorEmployeeId = nextEmployeeId;
     existing.batchStatus = nextStatus;
     if (body.fillingDate !== undefined) existing.fillingDate = body.fillingDate;
