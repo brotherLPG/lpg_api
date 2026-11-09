@@ -13,6 +13,7 @@ const {
   InventoryItem,
   Account,
   ExpenseCategory,
+  Counter,
 } = require('../models');
 const { buildPermissionCatalog, SUPER_ADMIN_ROLE_NAME } = require('../constants/permissions');
 
@@ -30,68 +31,64 @@ async function upsert(Model, filter, data) {
   });
 }
 
-async function seedMasters() {
-  const cyl11 = await upsert(CylinderType, { typeCode: 'CYL-11' }, {
-    typeCode: 'CYL-11',
-    typeName: '11 KG Cylinder',
-    cylinderCategory: 'domestic',
-    capacityKg: 11,
-    tareWeightKg: 8.5,
-    colorCode: 'red',
-    sellingPricePerCylinder: 0,
-    isActive: true,
-  });
+const CYLINDER_TYPES = [
+  { typeCode: 'CYL-11.8', typeName: '11.8 KG Cylinder', cylinderCategory: 'domestic', capacityKg: 11.8 },
+  { typeCode: 'CYL-15', typeName: '15 KG Cylinder', cylinderCategory: 'domestic', capacityKg: 15 },
+  { typeCode: 'CYL-35', typeName: '35 KG Cylinder', cylinderCategory: 'commercial', capacityKg: 35 },
+  { typeCode: 'CYL-45.4', typeName: '45.4 KG Cylinder', cylinderCategory: 'commercial', capacityKg: 45.4 },
+];
 
-  const cyl22 = await upsert(CylinderType, { typeCode: 'CYL-22' }, {
-    typeCode: 'CYL-22',
-    typeName: '22 KG Cylinder',
-    cylinderCategory: 'commercial',
-    capacityKg: 22,
-    tareWeightKg: 17,
-    colorCode: 'red',
-    sellingPricePerCylinder: 0,
-    isActive: true,
-  });
+async function seedMasters({ resetCylinders = false } = {}) {
+  if (resetCylinders) {
+    const [inventory, cylinders] = await Promise.all([
+      InventoryItem.deleteMany({}),
+      CylinderType.deleteMany({}),
+    ]);
+    await Counter.deleteMany({
+      _id: { $in: ['CylinderType:typeCode:CYL', 'InventoryItem:itemCode:ITM'] },
+    });
+    logger.info('Cleared inventory and cylinder types', {
+      inventory: inventory.deletedCount,
+      cylinderTypes: cylinders.deletedCount,
+    });
+  }
 
-  const inventoryDefaults = [
-    {
-      itemCode: 'FILLED-CYLINDER-11KG',
-      itemName: 'Filled 11 KG Cylinder',
-      itemCategory: 'filled-cylinder',
-      unitOfMeasure: 'PCS',
-      cylinderTypeId: cyl11._id,
-    },
-    {
-      itemCode: 'EMPTY-CYLINDER-11KG',
-      itemName: 'Empty 11 KG Cylinder',
-      itemCategory: 'empty-cylinder',
-      unitOfMeasure: 'PCS',
-      cylinderTypeId: cyl11._id,
-    },
-    {
-      itemCode: 'FILLED-CYLINDER-22KG',
-      itemName: 'Filled 22 KG Cylinder',
-      itemCategory: 'filled-cylinder',
-      unitOfMeasure: 'PCS',
-      cylinderTypeId: cyl22._id,
-    },
-    {
-      itemCode: 'EMPTY-CYLINDER-22KG',
-      itemName: 'Empty 22 KG Cylinder',
-      itemCategory: 'empty-cylinder',
-      unitOfMeasure: 'PCS',
-      cylinderTypeId: cyl22._id,
-    },
-  ];
-
-  for (const item of inventoryDefaults) {
-    await upsert(InventoryItem, { itemCode: item.itemCode }, {
-      ...item,
-      currentQuantity: 0,
-      minimumStockLevel: 0,
-      maximumStockLevel: 0,
+  for (const type of CYLINDER_TYPES) {
+    const cylinderType = await upsert(CylinderType, { typeCode: type.typeCode }, {
+      ...type,
+      tareWeightKg: 0,
+      colorCode: 'red',
+      sellingPricePerCylinder: 0,
       isActive: true,
     });
+
+    const capacityLabel = String(type.capacityKg);
+    const inventoryDefaults = [
+      {
+        itemCode: `FILLED-CYLINDER-${capacityLabel}KG`,
+        itemName: `Filled ${capacityLabel} KG Cylinder`,
+        itemCategory: 'filled-cylinder',
+        unitOfMeasure: 'PCS',
+        cylinderTypeId: cylinderType._id,
+      },
+      {
+        itemCode: `EMPTY-CYLINDER-${capacityLabel}KG`,
+        itemName: `Empty ${capacityLabel} KG Cylinder`,
+        itemCategory: 'empty-cylinder',
+        unitOfMeasure: 'PCS',
+        cylinderTypeId: cylinderType._id,
+      },
+    ];
+
+    for (const item of inventoryDefaults) {
+      await upsert(InventoryItem, { itemCode: item.itemCode }, {
+        ...item,
+        currentQuantity: 0,
+        minimumStockLevel: 0,
+        maximumStockLevel: 0,
+        isActive: true,
+      });
+    }
   }
 
   const accountDefaults = [
@@ -194,7 +191,8 @@ async function seed() {
     );
   }
 
-  await seedMasters();
+  const resetCylinders = process.argv.includes('--reset-cylinders');
+  await seedMasters({ resetCylinders });
 
   logger.info('Phase 2 seed complete', {
     permissions: permissionIds.length,
