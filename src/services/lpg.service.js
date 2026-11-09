@@ -480,7 +480,7 @@ async function getFillingFormOptions() {
       .select('employeeCode fullName jobTitle employmentStatus')
       .sort({ fullName: 1 })
       .lean(),
-    StorageTank.findOne().sort({ createdAt: 1 }).lean(),
+    StorageTank.findOne().sort({ createdAt: -1 }).lean(),
     peekSequentialCode(FillingBatch, 'batchNumber', 'FLL'),
   ]);
 

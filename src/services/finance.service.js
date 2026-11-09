@@ -1001,7 +1001,7 @@ async function getSaleFormOptions(query = {}) {
       .sort({ customerName: 1 })
       .lean(),
     InventoryItem.find({ isActive: true })
-      .populate('cylinderTypeId', 'sellingPricePerCylinder refillPriceAmount typeName typeCode capacityKg')
+      .populate('cylinderTypeId', 'sellingPricePerCylinder refillPriceAmount typeName typeCode capacityKg cylinderCategory')
       .select('itemCode itemName itemCategory unitOfMeasure currentQuantity unitSellingPriceAmount cylinderTypeId')
       .sort({ itemName: 1 })
       .lean(),
@@ -1042,16 +1042,22 @@ async function getSaleFormOptions(query = {}) {
       outstanding: outstandingByCustomer.get(String(customer._id)) || 0,
       label: `${customer.customerCode} – ${customer.customerName}`,
     })),
-    inventoryItems: inventoryItems.map((item) => ({
-      _id: item._id,
-      itemCode: item.itemCode,
-      itemName: item.itemName,
-      itemCategory: item.itemCategory,
-      unitOfMeasure: item.unitOfMeasure,
-      currentQuantity: item.currentQuantity || 0,
-      unitPriceAmount: roundMoney(defaultUnitPrice(item)),
-      label: `${item.itemCode} – ${item.itemName}`,
-    })),
+    inventoryItems: inventoryItems.map((item) => {
+      const cylinderType =
+        item.cylinderTypeId && typeof item.cylinderTypeId === 'object' ? item.cylinderTypeId : null;
+      return {
+        _id: item._id,
+        itemCode: item.itemCode,
+        itemName: item.itemName,
+        itemCategory: item.itemCategory,
+        unitOfMeasure: item.unitOfMeasure,
+        currentQuantity: item.currentQuantity || 0,
+        unitPriceAmount: roundMoney(defaultUnitPrice(item)),
+        capacityKg: Number(cylinderType?.capacityKg) || 0,
+        cylinderCategory: cylinderType?.cylinderCategory || '',
+        label: `${item.itemCode} – ${item.itemName}`,
+      };
+    }),
     accounts: accounts.map(mapAccountOption),
   };
 }
