@@ -2134,15 +2134,10 @@ async function createSale(body, req) {
       creditToApply = roundMoney(Math.min(creditToApply, totals.totalAmount));
     }
 
-    const maxCash = roundMoney(totals.totalAmount - creditToApply);
-    if (amountPaid > maxCash) {
-      throw new ApiError(
-        400,
-        creditToApply > 0
-          ? `Amount paid cannot exceed ${formatRs(maxCash)} after applying customer credit ${formatRs(creditToApply)}`
-          : 'Amount paid cannot exceed sale total'
-      );
-    }
+    // Cash above the invoice total stays on this sale as customer credit (refund due).
+    // Existing credit only covers what this payment did not already pay.
+    const cashShortfall = roundMoney(Math.max(0, totals.totalAmount - amountPaid));
+    creditToApply = roundMoney(Math.min(creditToApply, cashShortfall));
 
     const projectedOutstanding = roundMoney(totals.totalAmount - amountPaid - creditToApply);
     const saleType = projectedOutstanding > 0 ? 'credit' : 'cash';
@@ -2265,13 +2260,7 @@ async function applyDraftSaleFields(sale, body, session) {
   sale.totalAmount = totals.totalAmount;
 
   if (body.amountPaid !== undefined || body.payment?.paymentAmount !== undefined) {
-    const amountPaid = roundMoney(body.amountPaid ?? body.payment.paymentAmount);
-    if (amountPaid > totals.totalAmount) {
-      throw new ApiError(400, 'Amount paid cannot exceed sale total');
-    }
-    sale.paidAmount = amountPaid;
-  } else if (sale.paidAmount > totals.totalAmount) {
-    throw new ApiError(400, 'Amount paid cannot exceed sale total');
+    sale.paidAmount = roundMoney(body.amountPaid ?? body.payment.paymentAmount);
   }
 
   const balances = deriveBalances(sale.totalAmount, sale.paidAmount, sale.returnedAmount || 0);
