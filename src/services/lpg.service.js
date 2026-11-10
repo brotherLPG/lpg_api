@@ -1052,26 +1052,20 @@ function resolveFillingQty(body, cylinderType, existing) {
   const residualProvided = valueProvided(body.residualRecoveredKg);
   const actualProvided = valueProvided(body.actualLpgUsedKg);
 
-  let residualRecoveredKg = residualProvided
-    ? Number(body.residualRecoveredKg)
-    : Number(existing?.residualRecoveredKg || 0);
-
-  const sameSize = existing
-    && Number(cylinderCount) === Number(existing.cylinderCount)
-    && roundMoney(targetFillWeightKg) === roundMoney(existing.targetFillWeightKg);
-
+  let residualRecoveredKg;
   let actualLpgUsedKg;
   if (actualProvided) {
     actualLpgUsedKg = Number(body.actualLpgUsedKg);
-    if (!residualProvided) {
-      residualRecoveredKg = roundMoney(Math.max(0, expectedFillKg - actualLpgUsedKg));
-    }
+    residualRecoveredKg = residualProvided
+      ? Number(body.residualRecoveredKg)
+      : roundMoney(Math.max(0, expectedFillKg - actualLpgUsedKg));
   } else if (residualProvided) {
+    residualRecoveredKg = Number(body.residualRecoveredKg);
     actualLpgUsedKg = roundMoney(expectedFillKg - residualRecoveredKg);
-  } else if (existing?.actualLpgUsedKg != null && sameSize) {
-    actualLpgUsedKg = Number(existing.actualLpgUsedKg);
   } else {
-    actualLpgUsedKg = roundMoney(expectedFillKg - residualRecoveredKg);
+    // Line was sent with neither field: first fill. Do not keep an older leftover.
+    residualRecoveredKg = 0;
+    actualLpgUsedKg = expectedFillKg;
   }
 
   residualRecoveredKg = roundMoney(residualRecoveredKg);
