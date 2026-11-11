@@ -404,10 +404,16 @@ function toSaleItem(sale) {
 }
 
 function todayRange() {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
+  // Invoice dates are stored as UTC midnight of the calendar day the user picked.
+  // "Today" follows the Pakistan calendar so that day still matches after midnight PKT.
+  const KARACHI_OFFSET_MS = 5 * 60 * 60 * 1000;
+  const karachiNow = new Date(Date.now() + KARACHI_OFFSET_MS);
+  const start = new Date(Date.UTC(
+    karachiNow.getUTCFullYear(),
+    karachiNow.getUTCMonth(),
+    karachiNow.getUTCDate()
+  ));
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
   return { $gte: start, $lt: end };
 }
 
@@ -925,40 +931,46 @@ async function buildSaleListFilter(query) {
 }
 
 async function salesSummary() {
+  const typeGroup = [
+    {
+      $addFields: {
+        resolvedType: {
+          $ifNull: [
+            '$saleType',
+            { $cond: [{ $gt: ['$outstandingAmount', 0] }, 'credit', 'cash'] },
+          ],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: '$resolvedType',
+        amount: { $sum: '$totalAmount' },
+        count: { $sum: 1 },
+      },
+    },
+  ];
   const todayMatch = { ...activeSaleMatch(), invoiceDate: todayRange() };
-  const [todayRows, pending] = await Promise.all([
-    Sale.aggregate([
-      { $match: todayMatch },
-      {
-        $addFields: {
-          resolvedType: {
-            $ifNull: [
-              '$saleType',
-              { $cond: [{ $gt: ['$outstandingAmount', 0] }, 'credit', 'cash'] },
-            ],
-          },
-        },
-      },
-      {
-        $group: {
-          _id: '$resolvedType',
-          amount: { $sum: '$totalAmount' },
-          count: { $sum: 1 },
-        },
-      },
-    ]),
+  const [allRows, todayRows, pending] = await Promise.all([
+    Sale.aggregate([{ $match: activeSaleMatch() }, ...typeGroup]),
+    Sale.aggregate([{ $match: todayMatch }, ...typeGroup]),
     Sale.aggregate([
       { $match: { ...activeSaleMatch(), outstandingAmount: { $gt: 0 } } },
       { $group: { _id: null, amount: { $sum: '$outstandingAmount' } } },
     ]),
   ]);
 
-  const cash = todayRows.find((row) => row._id === 'cash') || { amount: 0, count: 0 };
-  const credit = todayRows.find((row) => row._id === 'credit') || { amount: 0, count: 0 };
+  const amountOf = (rows, type) => rows.find((row) => row._id === type) || { amount: 0, count: 0 };
+  const cash = amountOf(allRows, 'cash');
+  const credit = amountOf(allRows, 'credit');
+  const todayCash = amountOf(todayRows, 'cash');
+  const todayCredit = amountOf(todayRows, 'credit');
 
   return {
-    todaySalesAmount: roundMoney((cash.amount || 0) + (credit.amount || 0)),
-    todaySalesCount: (cash.count || 0) + (credit.count || 0),
+    totalSalesAmount: roundMoney((cash.amount || 0) + (credit.amount || 0)),
+    totalSalesCount: (cash.count || 0) + (credit.count || 0),
+    todaySalesAmount: roundMoney((todayCash.amount || 0) + (todayCredit.amount || 0)),
+    todaySalesCount: (todayCash.count || 0) + (todayCredit.count || 0),
     cashSalesAmount: roundMoney(cash.amount),
     cashSalesCount: cash.count || 0,
     creditSalesAmount: roundMoney(credit.amount),
