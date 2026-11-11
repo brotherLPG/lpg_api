@@ -954,8 +954,11 @@ async function salesSummary() {
   const [allRows, todayRows, pending] = await Promise.all([
     Sale.aggregate([{ $match: activeSaleMatch() }, ...typeGroup]),
     Sale.aggregate([{ $match: todayMatch }, ...typeGroup]),
+    // Net receivable: unpaid credit minus overpayments (negative outstanding).
+    // Filtering to outstandingAmount > 0 ignores refund-due invoices and
+    // disagrees with the customer remaining balance.
     Sale.aggregate([
-      { $match: { ...activeSaleMatch(), outstandingAmount: { $gt: 0 } } },
+      { $match: activeSaleMatch() },
       { $group: { _id: null, amount: { $sum: '$outstandingAmount' } } },
     ]),
   ]);
