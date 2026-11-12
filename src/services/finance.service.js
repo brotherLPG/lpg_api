@@ -18,6 +18,7 @@ const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode, peekSequentialCode, useSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
+const { getSaleGasRate } = require('./gasCost.service');
 const {
   PAYMENT_TERMS,
   SALE_TYPES,
@@ -1030,9 +1031,10 @@ async function getSaleFormOptions(query = {}) {
       ]
     : [Promise.resolve(0), Promise.resolve([])];
 
-  const [customerCreditAmount, refundDueInvoices, outstandingByCustomer] = await Promise.all([
+  const [customerCreditAmount, refundDueInvoices, outstandingByCustomer, gasRate] = await Promise.all([
     ...creditTasks,
     customerOutstandingByIds(customers.map((customer) => customer._id)),
+    getSaleGasRate().catch(() => null),
   ]);
 
   return {
@@ -1074,6 +1076,7 @@ async function getSaleFormOptions(query = {}) {
       };
     }),
     accounts: accounts.map(mapAccountOption),
+    ...(gasRate ? { gasRate } : {}),
   };
 }
 

@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = [
   { settingKey: 'companyName', settingValue: 'Brother LPG', settingDescription: 'Company display name' },
   { settingKey: 'defaultCurrency', settingValue: 'PKR', settingDescription: 'Default currency code' },
   { settingKey: 'lpgUnit', settingValue: 'KG', settingDescription: 'LPG weight unit' },
+  { settingKey: 'saleProfitPerKg', settingValue: '15', settingDescription: 'Rupees of profit added per kg on the suggested sale price' },
 ];
 
 async function upsert(Model, filter, data) {

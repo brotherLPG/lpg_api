@@ -15,6 +15,7 @@ const { parsePagination, paginated } = require('../utils/pagination');
 const { peekSequentialCode, useSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
 const { receiptFinance } = require('./finance.service');
+const { recomputeTankCosts } = require('./gasCost.service');
 const {
   RECEIPT_STATUSES,
   BATCH_STATUSES,
@@ -828,6 +829,8 @@ async function createReceipt(body, req) {
       }
     }
 
+    await recomputeTankCosts([tank._id], session);
+
     await writeAudit({
       req,
       session,
@@ -955,6 +958,7 @@ async function updateReceipt(id, body, req) {
       existing.referenceNumber = pickReceiptReferenceNumber(body) || '';
     }
     await existing.save({ session });
+    await recomputeTankCosts([oldValues.storageTankId, nextTankId], session);
 
     if (!wasConfirmed && willConfirm && nextPaidAmount > 0) {
       const alreadyPaid = await Payment.countDocuments({
@@ -1228,6 +1232,7 @@ async function createFilling(body, req) {
     };
 
     const [doc] = await FillingBatch.create([payload], { session });
+    await recomputeTankCosts([storageTankId], session);
     const quantityAfterKg = stockTank?.currentQuantityKg ?? quantityBeforeKg;
     await writeAudit({
       req,
@@ -1342,6 +1347,7 @@ async function updateFilling(id, body, req) {
     if (body.fillingDate !== undefined) existing.fillingDate = body.fillingDate;
     if (body.remarks !== undefined) existing.remarks = body.remarks;
     await existing.save({ session });
+    await recomputeTankCosts([oldValues.storageTankId, nextTankId], session);
 
     await writeAudit({
       req,
