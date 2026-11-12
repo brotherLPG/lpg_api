@@ -2285,6 +2285,309 @@ async function applyDraftSaleFields(sale, body, session) {
   return customer;
 }
 
+function quantityByItem(lines) {
+  const map = new Map();
+  for (const line of lines || []) {
+    const key = String(line.inventoryItemId?._id || line.inventoryItemId);
+    const quantity = Math.round(((map.get(key) || 0) + Number(line.quantity || 0)) * 1000) / 1000;
+    map.set(key, quantity);
+  }
+  return map;
+}
+
+function requestedPaidAmount(body, currentPaid) {
+  if (body.amountPaid !== undefined && body.amountPaid !== null) return roundMoney(body.amountPaid);
+  if (body.payment?.paymentAmount !== undefined && body.payment?.paymentAmount !== null) {
+    return roundMoney(body.payment.paymentAmount);
+  }
+  return roundMoney(currentPaid);
+}
+
+function amountAppliedToSale(payment, saleId) {
+  const id = String(saleId);
+  return roundMoney(
+    paymentAllocationsOf(payment).reduce((sum, alloc) => {
+      const allocSaleId = alloc.saleId?._id || alloc.saleId;
+      if (!allocSaleId || String(allocSaleId) !== id) return sum;
+      return sum + (Number(alloc.amountApplied) || 0);
+    }, 0)
+  );
+}
+
+async function paymentsTouchingSale(saleId, session) {
+  return Payment.find({
+    paymentStatus: { $ne: 'pending' },
+    $or: [{ saleId }, { 'allocations.saleId': saleId }],
+  }).session(session);
+}
+
+async function netCashOnSale(saleId, session) {
+  const payments = await paymentsTouchingSale(saleId, session);
+  let net = 0;
+  for (const payment of payments) {
+    const amount = amountAppliedToSale(payment, saleId);
+    if (payment.paymentType === 'receive') net += amount;
+    else if (payment.paymentType === 'refund') net -= amount;
+  }
+  return roundMoney(net);
+}
+
+function paymentIsShared(payment, saleId) {
+  return paymentAllocationsOf(payment).some((alloc) => {
+    const allocSaleId = alloc.saleId?._id || alloc.saleId;
+    if (allocSaleId && String(allocSaleId) !== String(saleId)) return true;
+    return Boolean(alloc.lpgReceiptId);
+  });
+}
+
+async function moveSaleToCustomer(sale, nextCustomerId, session) {
+  if (String(sale.customerId) === String(nextCustomerId)) return;
+
+  const netCash = await netCashOnSale(sale._id, session);
+  if (roundMoney(sale.paidAmount) !== netCash) {
+    throw new ApiError(
+      400,
+      'Cannot change the customer because customer credit is already applied on this invoice'
+    );
+  }
+
+  const payments = await paymentsTouchingSale(sale._id, session);
+  const shared = payments.find((payment) => paymentIsShared(payment, sale._id));
+  if (shared) {
+    throw new ApiError(
+      400,
+      'Cannot change the customer because a payment on this invoice is shared with another invoice'
+    );
+  }
+
+  if (payments.length) {
+    await Payment.updateMany(
+      { _id: { $in: payments.map((payment) => payment._id) } },
+      { $set: { customerId: nextCustomerId } },
+      { session }
+    );
+  }
+  await SalesReturn.updateMany(
+    { originalSaleId: sale._id },
+    { $set: { customerId: nextCustomerId } },
+    { session }
+  );
+}
+
+async function defaultSaleAccountId(saleId, explicitAccountId, session) {
+  if (explicitAccountId) return explicitAccountId;
+  const payments = await paymentsTouchingSale(saleId, session);
+  const receipt = payments.find((payment) => payment.paymentType === 'receive' && payment.accountId);
+  return receipt?.accountId || null;
+}
+
+async function adjustSalePaidAmount(sale, paidDelta, body, userId, session) {
+  const delta = roundMoney(paidDelta);
+  if (!delta) return;
+
+  const netCash = await netCashOnSale(sale._id, session);
+  if (delta < 0 && roundMoney(netCash + delta) < 0) {
+    throw new ApiError(
+      400,
+      'Amount paid cannot go below the customer credit already applied on this invoice'
+    );
+  }
+
+  const accountId = await defaultSaleAccountId(sale._id, pickSaleAccountId(body), session);
+  if (!accountId) {
+    throw new ApiError(400, 'Select a payment account to change the amount paid');
+  }
+
+  if (delta > 0) {
+    await postSaleReceipt({
+      sale,
+      customerId: sale.customerId,
+      amount: delta,
+      accountId,
+      paymentMethod: pickSalePaymentMethod(body) || sale.paymentMethod,
+      paymentDate: sale.invoiceDate,
+      referenceNumber: pickSaleReferenceNumber(body) ?? sale.referenceNumber,
+      userId,
+    }, session);
+    await applySalePayment(sale, delta, session);
+    return;
+  }
+
+  const amount = roundMoney(-delta);
+  if (amount > roundMoney(sale.paidAmount)) {
+    throw new ApiError(400, 'Paid amount cannot be negative');
+  }
+  const account = await resolveReceiveAccount(accountId, session);
+  await changeAccount(account._id, -amount, session, { verified: true });
+  await applySalePayment(sale, -amount, session);
+
+  const paymentNumber = await assignNumber(Payment, 'paymentNumber', 'PAY', null, session);
+  await Payment.create(
+    [
+      {
+        paymentNumber,
+        paymentType: 'refund',
+        customerId: sale.customerId,
+        saleId: sale._id,
+        allocations: [{ saleId: sale._id, amountApplied: amount }],
+        accountId: account._id,
+        paymentAmount: amount,
+        paymentMethod: paymentMethodForAccount(account, pickSalePaymentMethod(body) || sale.paymentMethod),
+        paymentDate: resolveBusinessDate(sale.invoiceDate),
+        referenceNumber: pickSaleReferenceNumber(body) || sale.referenceNumber || '',
+        remarks: `Payment adjustment on ${sale.invoiceNumber}`,
+        receivedOrPaidByUserId: userId,
+      },
+    ],
+    { session }
+  );
+}
+
+async function moveSaleReceiptAccount(sale, body, session) {
+  const accountId = pickSaleAccountId(body);
+  if (!accountId) return;
+
+  const payments = await paymentsTouchingSale(sale._id, session);
+  const receipts = payments
+    .filter((payment) => payment.paymentType === 'receive')
+    .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
+  if (!receipts.length) return;
+
+  const payment = receipts[0];
+  if (String(payment.accountId) === String(accountId)) return;
+
+  const refunds = payments.filter((item) => item.paymentType === 'refund');
+  if (receipts.length !== 1 || refunds.length || paymentIsShared(payment, sale._id)) {
+    throw new ApiError(400, 'This invoice has more than one payment. Change the account from Payments');
+  }
+
+  await changeAccount(payment.accountId, -payment.paymentAmount, session);
+  await changeAccount(accountId, payment.paymentAmount, session);
+  payment.accountId = accountId;
+  const method = pickSalePaymentMethod(body);
+  if (method) payment.paymentMethod = method;
+  const reference = pickSaleReferenceNumber(body);
+  if (reference !== undefined) payment.referenceNumber = reference || '';
+  await payment.save({ session });
+}
+
+async function syncSingleReceiptMeta(sale, body, session) {
+  const method = pickSalePaymentMethod(body);
+  const reference = pickSaleReferenceNumber(body);
+  if (!method && reference === undefined) return;
+
+  const receipts = await Payment.find({
+    saleId: sale._id,
+    paymentType: 'receive',
+    paymentStatus: { $ne: 'pending' },
+  }).session(session);
+  if (receipts.length !== 1) return;
+
+  const payment = receipts[0];
+  if (method) payment.paymentMethod = method;
+  if (reference !== undefined) payment.referenceNumber = reference || '';
+  await payment.save({ session });
+}
+
+async function applyPostedSaleEdit(sale, body, req, session) {
+  const editable = sale.saleStatus === 'confirmed'
+    || sale.saleStatus === 'partially-returned'
+    || sale.saleStatus === 'returned';
+  if (!editable) {
+    throw new ApiError(400, 'This sale cannot be edited');
+  }
+
+  const customer = await assertCustomer(body.customerId || sale.customerId, session);
+  await moveSaleToCustomer(sale, customer._id, session);
+
+  const previousLines = sale.lineItems.map((line) => ({
+    inventoryItemId: line.inventoryItemId,
+    quantity: line.quantity,
+  }));
+  const nextLines = body.lineItems ? await buildSaleLines(body.lineItems, session) : sale.lineItems;
+  const tradeDiscount = body.tradeDiscountAmount !== undefined
+    ? body.tradeDiscountAmount
+    : sale.tradeDiscountAmount;
+  const totals = totalsFromLines(nextLines, tradeDiscount);
+
+  const returned = await returnedQtyByItem(sale._id, session);
+  const previousQty = quantityByItem(previousLines);
+  const nextQty = quantityByItem(nextLines);
+  const itemIds = new Set([...previousQty.keys(), ...nextQty.keys(), ...returned.keys()]);
+  for (const itemId of itemIds) {
+    const returnedQty = Math.round((returned.get(itemId) || 0) * 1000) / 1000;
+    const quantity = nextQty.get(itemId) || 0;
+    if (quantity + 0.0001 < returnedQty) {
+      throw new ApiError(400, 'Quantity cannot be less than the quantity already returned');
+    }
+  }
+
+  const stockMoves = [];
+  for (const itemId of itemIds) {
+    const delta = Math.round(((previousQty.get(itemId) || 0) - (nextQty.get(itemId) || 0)) * 1000) / 1000;
+    if (delta) stockMoves.push({ itemId, delta });
+  }
+  stockMoves.sort((left, right) => right.delta - left.delta);
+  for (const move of stockMoves) {
+    await changeStock(move.itemId, move.delta, session);
+  }
+
+  sale.customerId = customer._id;
+  if (body.invoiceDate !== undefined) sale.invoiceDate = body.invoiceDate;
+  if (body.paymentTermDays !== undefined) sale.paymentTermDays = body.paymentTermDays;
+  if (body.remarks !== undefined || body.internalRemarks !== undefined) {
+    sale.remarks = body.remarks ?? body.internalRemarks;
+  }
+  if (body.paymentMethod !== undefined || body.payment?.paymentMethod !== undefined) {
+    sale.paymentMethod = pickSalePaymentMethod(body);
+  }
+  if (body.referenceNumber !== undefined || body.payment?.referenceNumber !== undefined) {
+    sale.referenceNumber = pickSaleReferenceNumber(body) || '';
+  }
+
+  sale.lineItems = nextLines;
+  sale.subtotalAmount = totals.subtotalAmount;
+  sale.discountAmount = totals.discountAmount;
+  sale.tradeDiscountAmount = totals.tradeDiscountAmount;
+  sale.taxAmount = totals.taxAmount;
+  sale.totalAmount = totals.totalAmount;
+
+  const balances = deriveBalances(sale.totalAmount, sale.paidAmount, sale.returnedAmount || 0);
+  sale.outstandingAmount = balances.outstandingAmount;
+  sale.paymentStatus = balances.paymentStatus;
+  sale.saleStatus = deriveSaleStatus(sale.returnedAmount || 0, sale.totalAmount, sale.saleStatus);
+  sale.saleType = balances.outstandingAmount > 0 ? 'credit' : 'cash';
+
+  const paidDelta = roundMoney(requestedPaidAmount(body, sale.paidAmount) - sale.paidAmount);
+  if (paidDelta) {
+    await adjustSalePaidAmount(sale, paidDelta, body, req.user._id, session);
+  } else {
+    await moveSaleReceiptAccount(sale, body, session);
+    await syncSingleReceiptMeta(sale, body, session);
+  }
+
+  sale.saleStatus = deriveSaleStatus(sale.returnedAmount || 0, sale.totalAmount, sale.saleStatus);
+  sale.saleType = sale.outstandingAmount > 0 ? 'credit' : 'cash';
+  if (sale.outstandingAmount > 0) {
+    await assertCreditLimit(customer, sale.outstandingAmount, session, sale._id);
+  }
+}
+
+const SALE_CONTENT_FIELDS = [
+  'customerId',
+  'invoiceDate',
+  'paymentTermDays',
+  'lineItems',
+  'tradeDiscountAmount',
+  'amountPaid',
+  'accountId',
+  'paymentAccountId',
+  'paidFromAccountId',
+  'payment',
+  'paymentMethod',
+  'referenceNumber',
+];
+
 async function updateSale(id, body, req) {
   const result = await withTransaction(async (session) => {
     const sale = await Sale.findById(id).session(session);
@@ -2293,34 +2596,28 @@ async function updateSale(id, body, req) {
     if (body.saveAsDraft === true && (body.saleStatus === 'confirmed' || body.saleStatus === 'cancelled')) {
       throw new ApiError(400, 'Cannot change sale status while saving as draft');
     }
-
-    const wantsDraftEdit = [
-      'customerId',
-      'invoiceDate',
-      'paymentTermDays',
-      'lineItems',
-      'tradeDiscountAmount',
-      'amountPaid',
-      'accountId',
-      'paymentAccountId',
-      'paidFromAccountId',
-      'payment',
-      'paymentMethod',
-      'referenceNumber',
-    ].some((key) => body[key] !== undefined);
-
-    if (wantsDraftEdit) {
-      if (sale.saleStatus !== 'draft') {
-        throw new ApiError(400, 'Only a draft sale can be edited');
-      }
-      await applyDraftSaleFields(sale, body, session);
+    if (body.saveAsDraft === true && sale.saleStatus !== 'draft') {
+      throw new ApiError(400, 'Only a draft sale can be saved as draft');
     }
 
-    const shouldConfirm = body.saleStatus === 'confirmed' || body.saveAsDraft === false;
-    if (shouldConfirm) {
-      if (sale.saleStatus !== 'draft') {
-        throw new ApiError(400, 'Only a draft sale can be confirmed');
+    const wantsContentEdit = SALE_CONTENT_FIELDS.some((key) => body[key] !== undefined);
+
+    if (body.saleStatus === 'cancelled') {
+      if (sale.saleStatus === 'cancelled') {
+        throw new ApiError(400, 'Sale is already cancelled');
       }
+    } else if (sale.saleStatus === 'cancelled' && wantsContentEdit) {
+      throw new ApiError(400, 'A cancelled sale cannot be edited');
+    } else if (sale.saleStatus === 'draft') {
+      if (wantsContentEdit) {
+        await applyDraftSaleFields(sale, body, session);
+      }
+    } else if (wantsContentEdit) {
+      await applyPostedSaleEdit(sale, body, req, session);
+    }
+
+    const shouldConfirm = sale.saleStatus === 'draft' && (body.saleStatus === 'confirmed' || body.saveAsDraft === false);
+    if (shouldConfirm) {
       const customer = await assertCustomer(sale.customerId, session);
       const applyCredit = body.applyCustomerCredit !== false;
       let creditToApply = 0;

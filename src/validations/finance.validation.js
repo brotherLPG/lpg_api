@@ -47,10 +47,15 @@ const saleLine = z.object({
   discountAmount: nonNegative.optional(),
 });
 
+const optionalPaymentMethod = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  return value;
+}, z.enum(PAYMENT_METHODS).optional());
+
 const salePayment = z.object({
   accountId: optionalAccountId,
-  paymentAmount: positiveAmount.optional(),
-  paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+  paymentAmount: nonNegative.optional(),
+  paymentMethod: optionalPaymentMethod,
   referenceNumber: z.string().trim().max(80).optional(),
 });
 
@@ -61,7 +66,7 @@ const saleAccountFields = {
 };
 
 const salePaymentMetaFields = {
-  paymentMethod: z.enum(PAYMENT_METHODS).optional(),
+  paymentMethod: optionalPaymentMethod,
   referenceNumber: z.string().trim().max(80).optional(),
 };
 
