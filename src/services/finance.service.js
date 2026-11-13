@@ -20,6 +20,13 @@ const { nextSequentialCode, peekSequentialCode, useSequentialCode } = require('.
 const { writeAudit } = require('./audit.service');
 const { getSaleGasRate } = require('./gasCost.service');
 const {
+  operationKey,
+  findApplied,
+  remember,
+  isOperationConflict,
+  replayIfApplied,
+} = require('./idempotency.service');
+const {
   PAYMENT_TERMS,
   SALE_TYPES,
   SALE_STATUS_OPTIONS,
@@ -2134,7 +2141,19 @@ async function getExpenseFormOptions() {
 }
 
 async function createSale(body, req) {
-  const result = await withTransaction(async (session) => {
+  const operationId = operationKey(req, body);
+  if (operationId) {
+    const replay = await replayIfApplied(operationId, loadSale);
+    if (replay) return replay;
+  }
+
+  let result;
+  try {
+    result = await withTransaction(async (session) => {
+    if (operationId) {
+      const prior = await findApplied(operationId, session);
+      if (prior?.entityId) return { replayId: prior.entityId };
+    }
     const customer = await assertCustomer(body.customerId, session);
     const isDraft = body.saveAsDraft === true;
     const lineItems = await buildSaleLines(body.lineItems, session);
@@ -2196,6 +2215,7 @@ async function createSale(body, req) {
           referenceNumber: pickSaleReferenceNumber(body) || '',
           createdByUserId: req.user._id,
           remarks: body.remarks || body.internalRemarks || '',
+          ...(operationId ? { clientOperationId: operationId } : {}),
         },
       ],
       { session }
@@ -2241,9 +2261,26 @@ async function createSale(body, req) {
       },
     });
 
-    return sale._id;
-  });
+    if (operationId) {
+      await remember(session, {
+        operationId,
+        entity: 'sales',
+        action: 'create',
+        entityId: sale._id,
+      });
+    }
 
+    return sale._id;
+    });
+  } catch (error) {
+    if (operationId && isOperationConflict(error)) {
+      const replay = await replayIfApplied(operationId, loadSale);
+      if (replay) return replay;
+    }
+    throw error;
+  }
+
+  if (result?.replayId) return loadSale(result.replayId);
   invalidateFinance();
   return loadSale(result);
 }
@@ -2592,7 +2629,19 @@ const SALE_CONTENT_FIELDS = [
 ];
 
 async function updateSale(id, body, req) {
-  const result = await withTransaction(async (session) => {
+  const operationId = operationKey(req, body);
+  if (operationId) {
+    const replay = await replayIfApplied(operationId, loadSale);
+    if (replay) return replay;
+  }
+
+  let result;
+  try {
+    result = await withTransaction(async (session) => {
+    if (operationId) {
+      const prior = await findApplied(operationId, session);
+      if (prior?.entityId) return { replayId: prior.entityId };
+    }
     const sale = await Sale.findById(id).session(session);
     if (!sale) throw new ApiError(404, 'Sale not found');
 
@@ -2697,9 +2746,25 @@ async function updateSale(id, body, req) {
       entityId: sale._id,
       newValues: body,
     });
+    if (operationId) {
+      await remember(session, {
+        operationId,
+        entity: 'sales',
+        action: 'update',
+        entityId: sale._id,
+      });
+    }
     return sale._id;
-  });
+    });
+  } catch (error) {
+    if (operationId && isOperationConflict(error)) {
+      const replay = await replayIfApplied(operationId, loadSale);
+      if (replay) return replay;
+    }
+    throw error;
+  }
 
+  if (result?.replayId) return loadSale(result.replayId);
   invalidateFinance();
   return loadSale(result);
 }
@@ -2876,7 +2941,19 @@ async function createReturn(body, req) {
 }
 
 async function createPayment(body, req) {
-  const result = await withTransaction(async (session) => {
+  const operationId = operationKey(req, body);
+  if (operationId) {
+    const replay = await replayIfApplied(operationId, loadPayment);
+    if (replay) return replay;
+  }
+
+  let result;
+  try {
+    result = await withTransaction(async (session) => {
+    if (operationId) {
+      const prior = await findApplied(operationId, session);
+      if (prior?.entityId) return { replayId: prior.entityId };
+    }
     const paymentType = paymentTypeOf(body);
     if (!paymentType) throw new ApiError(400, 'paymentType or direction is required');
 
@@ -2951,6 +3028,7 @@ async function createPayment(body, req) {
           referenceNumber: body.referenceNumber || '',
           remarks,
           receivedOrPaidByUserId: req.user._id,
+          ...(operationId ? { clientOperationId: operationId } : {}),
         },
       ],
       { session }
@@ -2966,9 +3044,26 @@ async function createPayment(body, req) {
       newValues: { paymentNumber, paymentType, paymentAmount: body.paymentAmount, paymentStatus: doc.paymentStatus },
     });
 
-    return doc._id;
-  });
+    if (operationId) {
+      await remember(session, {
+        operationId,
+        entity: 'payments',
+        action: 'create',
+        entityId: doc._id,
+      });
+    }
 
+    return doc._id;
+    });
+  } catch (error) {
+    if (operationId && isOperationConflict(error)) {
+      const replay = await replayIfApplied(operationId, loadPayment);
+      if (replay) return replay;
+    }
+    throw error;
+  }
+
+  if (result?.replayId) return loadPayment(result.replayId);
   invalidateFinance();
   return loadPayment(result);
 }

@@ -4,6 +4,13 @@ const ApiError = require('../utils/ApiError');
 const { parsePagination, paginated } = require('../utils/pagination');
 const { nextSequentialCode, claimSequentialCode } = require('../utils/nextCode');
 const { writeAudit } = require('./audit.service');
+const {
+  operationKey,
+  findApplied,
+  remember,
+  isOperationConflict,
+  replayIfApplied,
+} = require('./idempotency.service');
 
 async function withTransaction(work) {
   const session = await mongoose.startSession();
@@ -98,8 +105,36 @@ function createMasterService({
   }
 
   async function create(body, req) {
+    const operationId = operationKey(req, body);
+    if (operationId) {
+      const replay = await replayIfApplied(operationId, async (id) => toResponse(await loadById(id)));
+      if (replay) return replay;
+      if (Model.schema.path('clientOperationId')) {
+        const existing = await Model.findOne({ clientOperationId: operationId });
+        if (existing) {
+          await remember(null, {
+            operationId,
+            entity: moduleName,
+            action: 'create',
+            entityId: existing._id,
+          }).catch((error) => {
+            if (!isOperationConflict(error)) throw error;
+          });
+          return toResponse(existing);
+        }
+      }
+    }
+
     const run = async (session) => {
+      if (operationId && session) {
+        const prior = await findApplied(operationId, session);
+        if (prior?.entityId) return { replayId: prior.entityId };
+      }
       let payload = prepareCreate ? await prepareCreate({ ...body }, req, session) : { ...body };
+      delete payload.clientOperationId;
+      if (operationId && Model.schema.path('clientOperationId')) {
+        payload.clientOperationId = operationId;
+      }
       payload = await assignCode(payload, session);
       if (uniqueField) {
         await assertUnique(payload[uniqueField], null, session);
@@ -109,7 +144,7 @@ function createMasterService({
       try {
         doc = await createDocument(payload, session);
       } catch (error) {
-        if (error?.code !== 11000 || !codePrefix) {
+        if (error?.code !== 11000 || !codePrefix || isOperationConflict(error)) {
           throw error;
         }
         payload[uniqueField] = await nextSequentialCode(Model, uniqueField, codePrefix, 3, session);
@@ -130,10 +165,34 @@ function createMasterService({
         entityId: doc._id,
         newValues: payload,
       });
+      if (operationId) {
+        await remember(session, {
+          operationId,
+          entity: moduleName,
+          action: 'create',
+          entityId: doc._id,
+        });
+      }
       return doc._id;
     };
 
-    const id = useTransaction ? await withTransaction(run) : await run(null);
+    let id;
+    try {
+      id = useTransaction ? await withTransaction(run) : await run(null);
+    } catch (error) {
+      if (operationId && isOperationConflict(error)) {
+        const replay = await replayIfApplied(operationId, async (entityId) => toResponse(await loadById(entityId)));
+        if (replay) return replay;
+        if (Model.schema.path('clientOperationId')) {
+          const existing = await Model.findOne({ clientOperationId: operationId });
+          if (existing) return toResponse(existing);
+        }
+      }
+      throw error;
+    }
+    if (id && typeof id === 'object' && id.replayId) {
+      return toResponse(await loadById(id.replayId));
+    }
     invalidate(id);
     return toResponse(await loadById(id));
   }
@@ -208,7 +267,17 @@ function createMasterService({
   }
 
   async function update(id, body, req) {
+    const operationId = operationKey(req, body);
+    if (operationId) {
+      const replay = await replayIfApplied(operationId, async (entityId) => toResponse(await loadById(entityId)));
+      if (replay) return replay;
+    }
+
     const run = async (session) => {
+      if (operationId && session) {
+        const prior = await findApplied(operationId, session);
+        if (prior?.entityId) return { replayId: prior.entityId };
+      }
       let findQuery = Model.findById(id);
       if (session) findQuery = findQuery.session(session);
       const doc = await findQuery;
@@ -220,6 +289,7 @@ function createMasterService({
       const payload = prepareUpdate
         ? await prepareUpdate({ ...body }, doc, req, session)
         : { ...body };
+      delete payload.clientOperationId;
       if (uniqueField && payload[uniqueField] !== undefined) {
         await assertUnique(payload[uniqueField], id, session);
       }
@@ -245,10 +315,30 @@ function createMasterService({
         oldValues,
         newValues: payload,
       });
+      if (operationId) {
+        await remember(session, {
+          operationId,
+          entity: moduleName,
+          action: 'update',
+          entityId: doc._id,
+        });
+      }
       return doc._id;
     };
 
-    const docId = useTransaction ? await withTransaction(run) : await run(null);
+    let docId;
+    try {
+      docId = useTransaction ? await withTransaction(run) : await run(null);
+    } catch (error) {
+      if (operationId && isOperationConflict(error)) {
+        const replay = await replayIfApplied(operationId, async (entityId) => toResponse(await loadById(entityId)));
+        if (replay) return replay;
+      }
+      throw error;
+    }
+    if (docId && typeof docId === 'object' && docId.replayId) {
+      return toResponse(await loadById(docId.replayId));
+    }
     invalidate(docId);
     return toResponse(await loadById(docId));
   }

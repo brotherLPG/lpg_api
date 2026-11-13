@@ -1,3 +1,5 @@
+const logger = require('../utils/logger');
+
 function errorHandler(err, req, res, next) {
   let statusCode = err.statusCode || 500;
   let message = err.message || 'Internal server error';
@@ -41,6 +43,16 @@ function errorHandler(err, req, res, next) {
   }
 
   res.locals.activityMessage = message;
+
+  const operationId = req.headers?.['idempotency-key'];
+  if (operationId && statusCode >= 400) {
+    logger.warn('Sync operation rejected', {
+      operationId: String(operationId),
+      statusCode,
+      message,
+      path: req.originalUrl,
+    });
+  }
 
   res.status(statusCode).json({
     success: false,

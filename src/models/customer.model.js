@@ -8,6 +8,12 @@ const customerSchema = new mongoose.Schema(
       unique: true,
       trim: true,
     },
+    clientOperationId: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+    },
     customerName: {
       type: String,
       required: [true, 'customerName is required'],

@@ -30,6 +30,12 @@ const paymentSchema = new mongoose.Schema(
       unique: true,
       trim: true,
     },
+    clientOperationId: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+    },
     paymentType: {
       type: String,
       enum: PAYMENT_TYPES,

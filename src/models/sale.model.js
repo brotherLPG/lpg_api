@@ -32,6 +32,12 @@ const saleSchema = new mongoose.Schema(
       unique: true,
       trim: true,
     },
+    clientOperationId: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+    },
     customerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Customer',
