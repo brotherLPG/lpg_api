@@ -146,21 +146,31 @@ async function readProfitPerKg() {
   return DEFAULT_SALE_PROFIT_PER_KG;
 }
 
-async function ensureTankCosts() {
-  const missing = await StorageTank.countDocuments({
-    $or: [{ costComputedAt: null }, { costComputedAt: { $exists: false } }],
-  });
-  if (!missing) return;
+async function refreshTankCosts() {
   const tanks = await StorageTank.find().select('_id').lean();
   await recomputeTankCosts(tanks.map((tank) => tank._id));
 }
 
 async function getSaleGasRate() {
-  await ensureTankCosts();
-  const [tanks, profitPerKg] = await Promise.all([
+  await refreshTankCosts();
+  const [tanks, profitPerKg, receiptCount] = await Promise.all([
     StorageTank.find().select('averageCostPerKg costStockKg lastCostEventAt').lean(),
     readProfitPerKg(),
+    LPGReceipt.countDocuments({
+      receiptStatus: { $ne: 'pending' },
+      purchaseRatePerKg: { $gt: 0 },
+      receivedQuantityKg: { $gt: 0 },
+    }),
   ]);
+
+  if (!receiptCount) {
+    return {
+      averageCostPerKg: 0,
+      profitPerKg,
+      profitableRatePerKg: roundRate(profitPerKg),
+      stockKg: 0,
+    };
+  }
 
   let stockKg = 0;
   let stockValue = 0;
