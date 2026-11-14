@@ -931,7 +931,11 @@ async function buildSaleListFilter(query) {
   return filter;
 }
 
-async function salesSummary() {
+async function salesSummary(query = {}) {
+  const customerMatch = query.customerId
+    ? { customerId: asObjectId(query.customerId) }
+    : {};
+  const baseMatch = { ...activeSaleMatch(), ...customerMatch };
   const typeGroup = [
     {
       $addFields: {
@@ -951,15 +955,15 @@ async function salesSummary() {
       },
     },
   ];
-  const todayMatch = { ...activeSaleMatch(), invoiceDate: todayRange() };
+  const todayMatch = { ...baseMatch, invoiceDate: todayRange() };
   const [allRows, todayRows, pending] = await Promise.all([
-    Sale.aggregate([{ $match: activeSaleMatch() }, ...typeGroup]),
+    Sale.aggregate([{ $match: baseMatch }, ...typeGroup]),
     Sale.aggregate([{ $match: todayMatch }, ...typeGroup]),
     // Net receivable: unpaid credit minus overpayments (negative outstanding).
     // Filtering to outstandingAmount > 0 ignores refund-due invoices and
     // disagrees with the customer remaining balance.
     Sale.aggregate([
-      { $match: activeSaleMatch() },
+      { $match: baseMatch },
       { $group: { _id: null, amount: { $sum: '$outstandingAmount' } } },
     ]),
   ]);
@@ -993,7 +997,7 @@ async function listSales(query) {
   const [items, total, summary] = await Promise.all([
     findQuery.lean(),
     Sale.countDocuments(filter),
-    salesSummary(),
+    salesSummary(query),
   ]);
 
   return {
