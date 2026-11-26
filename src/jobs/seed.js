@@ -14,6 +14,7 @@ const {
   Account,
   ExpenseCategory,
   Counter,
+  StorageTank,
 } = require('../models');
 const { buildPermissionCatalog, SUPER_ADMIN_ROLE_NAME } = require('../constants/permissions');
 
@@ -125,6 +126,17 @@ async function seedMasters({ resetCylinders = false } = {}) {
       isActive: true,
     });
   }
+
+  await upsert(StorageTank, { tankCode: 'TNK-001' }, {
+    tankCode: 'TNK-001',
+    tankName: 'Main Storage Tank 1',
+    capacityKg: 50000,
+    currentQuantityKg: 0,
+    minimumSafeQuantityKg: 5000,
+    maximumSafeQuantityKg: 42500,
+    tankStatus: 'operational',
+    locationDescription: 'Main Plant Yard',
+  });
 }
 
 async function seed() {

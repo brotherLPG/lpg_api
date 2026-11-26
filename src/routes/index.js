@@ -9,9 +9,11 @@ const masters = require('./masters.routes');
 const { lpgReceipts, fillingBatches } = require('./lpg.routes');
 const { sales, salesReturns, payments, expenses } = require('./finance.routes');
 const logRoutes = require('./log.routes');
+const chatRoutes = require('./chat.routes');
 
 const router = express.Router();
 
+router.use('/chat', chatRoutes);
 router.use('/logs', logRoutes);
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);

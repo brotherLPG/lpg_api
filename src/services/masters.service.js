@@ -312,7 +312,26 @@ async function getTankDashboard(query = {}) {
   const recentLimit = Math.min(20, Math.max(1, parseInt(query.recentLimit, 10) || 5));
   const tank = await StorageTank.findOne().sort({ createdAt: 1 }).lean();
   if (!tank) {
-    throw new ApiError(404, 'No storage tank is configured');
+    return {
+      configured: false,
+      message: 'No storage tank is configured',
+      tankCode: '',
+      tankName: 'No Tank Configured',
+      tankStatus: 'inactive',
+      tankStatusLabel: 'Inactive',
+      locationDescription: '',
+      capacityKg: 0,
+      currentQuantityKg: 0,
+      minimumSafeQuantityKg: 0,
+      maximumSafeQuantityKg: 0,
+      level: {
+        fillPercent: 0,
+        stockStatus: 'empty',
+        stockAlert: 'No storage tank is configured in the system',
+      },
+      recentReceipts: [],
+      recentBatches: [],
+    };
   }
 
   const [receipts, batches] = await Promise.all([

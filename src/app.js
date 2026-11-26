@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const env = require('./config/env');
-const { connectDB, dbState } = require('./config/db');
+const db = require('./config/db');
 const routes = require('./routes');
 const notFound = require('./middlewares/notFound');
 const errorHandler = require('./middlewares/errorHandler');
@@ -49,7 +49,7 @@ app.use(async (req, res, next) => {
     return next();
   }
   try {
-    await connectDB();
+    await db.connectDB();
     next();
   } catch (error) {
     next(error);
@@ -63,7 +63,7 @@ app.get('/health', (req, res) => {
     data: {
       service: 'brother-lpg-api',
       phase: 5,
-      db: dbState(),
+      db: db.dbState(),
       timestamp: new Date().toISOString(),
     },
   });

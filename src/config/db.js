@@ -1,7 +1,13 @@
+const dns = require('dns');
 const mongoose = require('mongoose');
 const env = require('./env');
 const logger = require('../utils/logger');
 const Counter = require('../models/counter.model');
+
+// Ensure MongoDB Atlas SRV lookups work reliably on Windows/ISP environments
+try {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+} catch (_) {}
 
 const globalCache = globalThis;
 

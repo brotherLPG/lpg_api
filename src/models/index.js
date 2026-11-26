@@ -22,6 +22,7 @@ const MaintenanceRecord = require('./maintenanceRecord.model');
 const Asset = require('./asset.model');
 const Counter = require('./counter.model');
 const ActivityLog = require('./activityLog.model');
+const ChatRequestWindow = require('./chatRequestWindow.model');
 
 module.exports = {
   Permission,
@@ -48,4 +49,5 @@ module.exports = {
   Asset,
   Counter,
   ActivityLog,
+  ChatRequestWindow,
 };
